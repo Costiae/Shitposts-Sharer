@@ -8,7 +8,7 @@
   "watch_only_registered": {
     "description": "只监视已注册的群",
     "type": "bool",
-    "hint": "开启时，只有 /屎 注册 过的群才会被处理。",
+    "hint": "开启时，只有 /shit register 注册过的群才会被处理。",
     "default": true
   },
   "text_min_chars": {
@@ -108,7 +108,7 @@
   "threshold_overall": {
     "description": "全局搬运阈值",
     "type": "float",
-    "hint": "群可信度低于此值不会被搬入；单群可用 /屎 阈值 覆盖。",
+    "hint": "群可信度低于此值不会被搬入；单群可用 /shit threshold 覆盖。",
     "default": 0.0
   },
   "keyword_threshold": {

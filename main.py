@@ -10,24 +10,26 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from typing import Any
 
 from astrbot.api import AstrBotConfig, logger  # type: ignore[import-not-found]
 from astrbot.api.event import AstrMessageEvent, filter  # type: ignore[import-not-found]
 from astrbot.api.star import Context, Star, register  # type: ignore[import-not-found]
 
-from .core.commands import Commands, CommandResult, group_name, is_group_event
+from .core.commands import Commands, CommandResult, is_group_event
 from .core.config import Settings
 from .core.pipeline import Loggerish, Pipeline
 from .core.storage import Storage
+
+# 插件指令一律 ASCII；alias 只作为历史中文指令的兼容入口
+COMMAND = "shit"
+ALIASES = {"spam", "ss"}
 
 
 @register(
     "astrbot_plugin_shitposts_sharer",
     "Costia",
-    "自动化搬屎：识别群里的屎，分析口味，搬到对味的群",
+    "Detect group chat shitposts, learn each group's taste, and auto-relay them",
     "0.1.0",
     "https://github.com/Costiae/Shitposts-Sharer",
 )
@@ -67,44 +69,45 @@ class ShitpostsSharer(Star):
             logger.error(f"搬屎监听出错：{type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------------ 指令
-    @filter.command("屎")
+    @filter.command(COMMAND, alias=ALIASES)
     async def shit(self, event: AstrMessageEvent, *args):
-        """/屎 <子指令>：注册、状态、阈值等。"""
+        """/shit <subcommand>: register, status, threshold, ..."""
         text = event.message_str.strip()
-        # 去掉命令词本身
         parts = text.split()
-        if parts and parts[0].lstrip("/") == "屎":
+        # 去掉命令词本身（含中文别名）
+        if parts and _strip_slash(parts[0]) in {COMMAND, *ALIASES}:
             parts = parts[1:]
-        args = parts
 
         try:
             result: CommandResult = self.commands.dispatch(
-                event, args, is_admin=_is_admin(event)
+                event, parts, is_admin=_is_admin(event)
             )
         except Exception as exc:  # pragma: no cover
-            logger.error(f"搬屎指令出错：{type(exc).__name__}: {exc}")
-            yield event.plain_result("指令执行出错了，详情见日志。")
+            logger.error(f"shit command failed: {type(exc).__name__}: {exc}")
+            yield event.plain_result("Command failed, see the log for details.")
             return
 
         yield event.plain_result(result.text)
 
-    @filter.command("搬屎")
+    @filter.command("shoot", alias={"manual"})
     async def manual_shot(self, event: AstrMessageEvent, *args):
-        """/搬屎 <文本>：管理员手动把一段文本当屎试搬。"""
+        """/shoot <text>: admin-only, push a text straight into the pipeline."""
         if not _is_admin(event):
-            yield event.plain_result("只有管理员能手动搬屎。")
+            yield event.plain_result("Admin only.")
             return
 
         text = event.message_str.strip()
         parts = text.split(maxsplit=1)
         payload = parts[1] if len(parts) > 1 else ""
         if not payload:
-            yield event.plain_result("用法：/搬屎 <一段文本>")
+            yield event.plain_result("Usage: /shoot <text>")
             return
 
         group = self.storage.get_group(event.unified_msg_origin)
         if group is None:
-            yield event.plain_result("本群还没注册，先用 /屎 注册 both 注册一下。")
+            yield event.plain_result(
+                "This group is not registered. Run /shit register both first."
+            )
             return
 
         from .core.models import GroupProfile, Message, Segment
@@ -114,20 +117,23 @@ class ShitpostsSharer(Star):
             sender_name="管理员",
             segments=[Segment(kind="plain", text=payload)],
         )
-        suspicion = self.pipeline.accumulator.open(message, "手动搬屎")
+        suspicion = self.pipeline.accumulator.open(message, "manual")
         result = await self.pipeline.handle_suspicion(suspicion)
         if result is None:
-            yield event.plain_result("这条没被判成屎，看看日志里的 LLM 输出。")
+            yield event.plain_result("Not judged as a shit. Check the LLM output in the log.")
             return
-        yield event.plain_result(
-            f"关键词：{'、'.join(result.get('keywords', [])) or '无'}\n"
-            f"已搬到：{'、'.join(result.get('delivered', [])) or '没有群接盘'}"
-        )
+        keywords = ", ".join(result.get("keywords", [])) or "none"
+        delivered = ", ".join(result.get("delivered", [])) or "no group took it"
+        yield event.plain_result(f"keywords: {keywords}\ndelivered: {delivered}")
 
     async def terminate(self) -> None:
         await self.pipeline.stop()
         self.storage.close()
-        logger.info("搬屎插件已卸载。")
+        logger.info("Shitposts Sharer unloaded.")
+
+
+def _strip_slash(token: str) -> str:
+    return token.lstrip("/").lower()
 
 
 def _resolve_data_dir() -> Path:

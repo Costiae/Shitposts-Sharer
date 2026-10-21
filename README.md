@@ -84,15 +84,20 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 
 ## 使用
 
+所有指令为纯 ASCII：
+
 | 指令 | 说明 |
 | --- | --- |
-| `/屎 注册 both` | 把本群加入搬运网络（`in` / `out` / `both`，可带阈值如 `/屎 注册 both 0.8`） |
-| `/屎 注销` | 移出网络 |
-| `/屎 状态` | 看本群口味、可信度、是否够格收屎 |
-| `/屎 群列表` | 所有已注册群一览 |
-| `/屎 阈值 0.8` | 调整本群阈值 |
-| `/屎 暂停` / `/屎 继续` | 暂停/恢复本群收发 |
-| `/搬屎 <文本>` | 管理员手动试搬一条 |
+| `/shit register both` | 把本群加入搬运网络（`in` / `out` / `both`，可带阈值如 `/shit register both 0.8`） |
+| `/shit unregister` | 移出网络 |
+| `/shit status` | 看本群口味、可信度、是否够格收屎 |
+| `/shit list` | 所有已注册群一览 |
+| `/shit threshold 0.8` | 调整本群阈值（也接受 `80%`） |
+| `/shit pause` / `/shit resume` | 暂停 / 恢复本群收发 |
+| `/shit help` | 帮助 |
+| `/shoot <文本>` | 管理员手动把一段文本丢进流水线 |
+
+`/shit` 的别名：`/spam`、`/ss`。
 
 ## 配置要点（WebUI）
 
@@ -146,7 +151,7 @@ core/
   analyzer.py      # 判屎 / 上下文关系 / 群契合度 三套提示词
   router.py        # 搬运路由
   sender.py        # 跨群消息组装与发送
-  commands.py      # /屎 指令
+  commands.py      # /shit 指令（纯 ASCII）
   pipeline.py      # 串起一切
 tests/             # unittest
 ```
