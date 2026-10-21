@@ -1,0 +1,184 @@
+{
+  "enabled": {
+    "description": "启用搬屎",
+    "type": "bool",
+    "hint": "总开关。关掉后不再监听、不再搬运。",
+    "default": true
+  },
+  "watch_only_registered": {
+    "description": "只监视已注册的群",
+    "type": "bool",
+    "hint": "开启时，只有 /屎 注册 过的群才会被处理。",
+    "default": true
+  },
+  "text_min_chars": {
+    "description": "长文本触发阈值（字）",
+    "type": "int",
+    "hint": "至少有这么多字的纯文本才会被送去判屎。合并转发、图片、B站分享不受此限制。",
+    "default": 60
+  },
+  "forward_min_nodes": {
+    "description": "合并转发最少条数",
+    "type": "int",
+    "hint": "至少几条的合并转发才值得看。",
+    "default": 1
+  },
+  "image_llm": {
+    "description": "图片交给多模态模型",
+    "type": "bool",
+    "hint": "开启后会把群消息里的图片一起发给模型（要求分析模型支持视觉）。",
+    "default": true
+  },
+  "max_images_per_message": {
+    "description": "单条消息最多分析几张图",
+    "type": "int",
+    "default": 4
+  },
+  "trigger_cooldown_sec": {
+    "description": "触发冷却（秒）",
+    "type": "int",
+    "hint": "同一个群在这个时间内最多开启一次判屎，避免刷屏。",
+    "default": 30
+  },
+  "history_max_messages": {
+    "description": "上下文保留条数",
+    "type": "int",
+    "hint": "为判断'这坨屎和上文有没有关系'而保留的群聊历史条数。",
+    "default": 40
+  },
+  "window_seconds": {
+    "description": "聚合窗口（秒）",
+    "type": "int",
+    "hint": "命中候选后，继续收集多长时间的后续消息再一起判定。",
+    "default": 90
+  },
+  "max_messages_per_shit": {
+    "description": "窗口内最多收集条数",
+    "type": "int",
+    "default": 20
+  },
+  "shit_min_intensity": {
+    "description": "判为屎的最低离谱度",
+    "type": "float",
+    "hint": "模型给出的 0-1 离谱分低于此值就不搬。",
+    "default": 0.6
+  },
+  "shit_prompt": {
+    "description": "判屎提示词（留空用内置）",
+    "type": "text",
+    "hint": "可用占位符：{group_name} {kind} {content} {BILI_BLOCK} {CONTEXT_BLOCK}。必须要求模型输出 JSON。",
+    "default": ""
+  },
+  "context_prompt": {
+    "description": "上下文关系提示词（留空用内置）",
+    "type": "text",
+    "hint": "可用占位符：{messages}。",
+    "default": ""
+  },
+  "group_prompt": {
+    "description": "群契合度提示词（留空用内置）",
+    "type": "text",
+    "hint": "可用占位符：{group_name} {intake} {recent_keywords} {shit_text} {shit_keywords}。",
+    "default": ""
+  },
+  "extra_prompt": {
+    "description": "附加要求",
+    "type": "text",
+    "hint": "追加到所有提示词末尾的自由文本，例如'二次元黑话算屎'。",
+    "default": ""
+  },
+  "analysis_provider_id": {
+    "description": "分析模型",
+    "type": "string",
+    "hint": "留空使用默认对话模型。图片分析需要支持视觉的模型。",
+    "default": ""
+  },
+  "embedding_provider_id": {
+    "description": "（暂未启用）Embedding 模型",
+    "type": "string",
+    "hint": "保留字段。当前匹配基于关键词向量，无需 Embedding。",
+    "default": ""
+  },
+  "confidence_k": {
+    "description": "可信度下限参数 k",
+    "type": "float",
+    "hint": "可信度 = 样本饱和度 × 稳定度 × 采纳率；k 越大，需要更多原生屎样本才可信。",
+    "default": 10.0
+  },
+  "threshold_overall": {
+    "description": "全局搬运阈值",
+    "type": "float",
+    "hint": "群可信度低于此值不会被搬入；单群可用 /屎 阈值 覆盖。",
+    "default": 0.0
+  },
+  "keyword_threshold": {
+    "description": "关键词相似度阈值",
+    "type": "float",
+    "hint": "屎与群口味的余弦相似度，低于此值视为不对味。",
+    "default": 0.75
+  },
+  "keyword_tolerance": {
+    "description": "相似度容差",
+    "type": "float",
+    "hint": "在阈值下方这个范围内仍算勉强及格，越接近阈值分数越高。中文短会话语料的余弦一般偏低，建议 0.10 左右。",
+    "default": 0.10
+  },
+  "llm_rerank": {
+    "description": "用 LLM 复核候选群",
+    "type": "bool",
+    "hint": "关键词粗筛之后，再让模型判断这条屎对不对每个候选群的口味（更准，但更慢更贵）。",
+    "default": true
+  },
+  "llm_candidates": {
+    "description": "LLM 复核的候选群数",
+    "type": "int",
+    "hint": "关键词粗筛后进入 LLM 复核的前 N 个群。",
+    "default": 3
+  },
+  "max_targets": {
+    "description": "单条屎最多搬几个群",
+    "type": "int",
+    "hint": "0 表示不限制。",
+    "default": 0
+  },
+  "with_context": {
+    "description": "搬运时附带上下文",
+    "type": "bool",
+    "hint": "把群友围绕这坨屎的讨论一起带过去；关掉则只搬原文。",
+    "default": true
+  },
+  "max_context_messages": {
+    "description": "附带几条上下文",
+    "type": "int",
+    "default": 6
+  },
+  "anon_source": {
+    "description": "匿名来源群",
+    "type": "bool",
+    "hint": "开启后不显示屎来自哪个群。",
+    "default": true
+  },
+  "source_label": {
+    "description": "搬运前缀",
+    "type": "string",
+    "default": "【搬屎】"
+  },
+  "bili_info": {
+    "description": "抓取 B 站视频信息",
+    "type": "bool",
+    "hint": "软依赖 astrbot_plugin_bilibili；没装也能用内置直连；都失败时降级为只有 BV 号。",
+    "default": true
+  },
+  "dry_run": {
+    "description": "演练模式",
+    "type": "bool",
+    "hint": "开启后只判定和记录，不真的发到群里。调参时用。",
+    "default": false
+  },
+  "proxy": {
+    "description": "网络代理",
+    "type": "string",
+    "hint": "抓取 B 站信息时可选的代理，如 http://127.0.0.1:7890。",
+    "default": ""
+  }
+}

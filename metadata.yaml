@@ -1,0 +1,12 @@
+name: astrbot_plugin_shitposts_sharer
+display_name: 搬屎机器人
+desc: 识别群聊里的"屎"（合并转发、图片、B站分享等），分析各群口味与可信度，自动搬运到对味的群
+help: 发送 /屎 查看指令帮助；/屎 注册 both 把本群加入搬运网络
+version: v0.1.0
+author: Costia
+repo: https://github.com/Costia/astrbot_plugin_shitposts_sharer
+astrbot_version: ">=4.26.0"
+support_platforms:
+  - aiocqhttp
+  - telegram
+  - weixin_oc

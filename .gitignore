@@ -44,3 +44,12 @@ Thumbs.db
 
 # 签发前的临时文件
 *.log
+
+# 测试/安装过程中可能在沙箱下产生、且无法被 Git 读取的暂存目录
+.piptmp/
+.pydeps/
+.testtmp/
+tests/_scratch/
+tests/__expl__/
+tests/__probe__/
+tests/tmp*/
