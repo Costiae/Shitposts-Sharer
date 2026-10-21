@@ -84,18 +84,33 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 
 ## 使用
 
-所有指令为纯 ASCII：
+所有指令为纯 ASCII。
+
+**`<target>` 是目标群**，省略时默认当前会话。因为搬屎的接收方是静默的——
+群友不会、也不该去配置"自己这个群怎么收屎"，实际使用者是坐在 A 群里管 B 群的运营者。
+
+| `<target>` 写法 | 例子 |
+| --- | --- |
+| 省略 | `/shit off` → 停掉当前群 |
+| 群号 | `/shit off 200002` |
+| 完整 UMO | `/shit off aiocqhttp:GroupMessage:200002` |
+| 序号 | `/shit off #2`（配合 `/shit list`） |
+| 群名片段 | `/shit off 吃屎甲` |
 
 | 指令 | 说明 |
 | --- | --- |
-| `/shit register both` | 把本群加入搬运网络（`in` / `out` / `both`，可带阈值如 `/shit register both 0.8`） |
-| `/shit unregister` | 移出网络 |
-| `/shit status` | 看本群口味、可信度、是否够格收屎 |
-| `/shit list` | 所有已注册群一览 |
-| `/shit threshold 0.8` | 调整本群阈值（也接受 `80%`） |
-| `/shit pause` / `/shit resume` | 暂停 / 恢复本群收发 |
+| `/shit register <in\|out\|both> [target] [threshold]` | 加入搬运网络，默认 `both`，阈值可写 `0.8` 或 `80%` |
+| `/shit unregister [target]` | 移出网络 |
+| `/shit on <target>` | 开启该群搬运 |
+| `/shit off <target>` | 暂停该群搬运（静默） |
+| `/shit status [target]` | 口味、可信度、是否够格收屎 |
+| `/shit list` | 所有群一览（带 `#序号`） |
+| `/shit threshold <0-1\|xx%> [target]` | 设单群阈值 |
+| `/shit purge [target]` | 彻底删除该群记录（仅管理员） |
 | `/shit help` | 帮助 |
-| `/shoot <文本>` | 管理员手动把一段文本丢进流水线 |
+| `/shoot <文本>` | 管理员：把一段文本直接丢进流水线 |
+
+**权限**：操作当前群不需要管理员（群友自助注册）；`<target>` 指向别的群时必须是管理员。
 
 `/shit` 的别名：`/spam`、`/ss`。
 

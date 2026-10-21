@@ -1,9 +1,16 @@
-"""群指令：注册群、看口味、调阈值、暂停。
+"""群指令：跨群管理搬运网络。
 
-设计原则：**群友随时能自己注册自己的群**，因为"群里一套、WebUI 一套"
-会很烦；但**修改别人的群、全局开关、手动强制搬**只给管理员。
+搬屎的接收方是静默的：群里的人不配置"自己这个群怎么收屎"。
+实际使用者是运营者 —— 坐在 A 群（或私聊）里操作 B 群。所以每条子指令的
+**第一个参数是目标群**，省略时默认当前会话：
 
-所有指令与子指令一律使用 ASCII 英文，避免不同平台/编码下的解析歧义。
+    /shit register in           在当前群注册（群友自助用）
+    /shit pause 123456          在 A 群把 B 群暂停（管理员）
+    /shit on aiocqhttp:GroupMessage:123456
+    /shit list                  A 群和 B 群谁该收谁该发
+
+权限：只操作当前会话时所有人都能用；一旦目标是别的群，必须是管理员。
+所有指令与回复文本保持 ASCII。
 """
 
 from __future__ import annotations
@@ -15,17 +22,31 @@ from .config import Settings
 from .models import Direction, GroupProfile
 from .profile import confidence_score, describe_intake
 from .storage import Storage
+from .targets import (
+    current_origin,
+    describe_group,
+    looks_like_target,
+    render_ambiguous,
+    resolve,
+)
 
 HELP_TEXT = """Shitposts Sharer commands
-/shit register <in|out|both> [threshold]   join the network (default: both)
-/shit unregister                           leave the network
-/shit status                               this group's taste and confidence
-/shit list                                 all registered groups
-/shit threshold <0-1|xx%>                  delivery threshold for this group
-/shit pause | /shit resume                 pause / resume this group
-/shit help                                 show this help
+  <target> = group id, full UMO, #index, or name. Omit = current session.
 
-Direction: in = receive only, out = emit only, both = receive and emit."""
+  /shit register <in|out|both> [target] [threshold]   join the network
+  /shit unregister [target]                           leave the network
+  /shit on <target>                                   enable relay for a group
+  /shit off <target>                                  pause relay for a group
+  /shit status [target]                               taste + confidence
+  /shit list                                          all groups
+  /shit threshold <0-1|xx%> [target]                  set delivery threshold
+  /shit purge [target]                                delete a group (admin)
+  /shit help                                          this text
+
+  /shoot <text>                                       admin: test one payload
+
+Direction: in = receive only, out = emit only, both = receive and emit.
+Handling a group other than the current one requires admin."""
 
 
 @dataclass(slots=True)
@@ -52,112 +73,215 @@ class Commands:
         if action in ("register", "reg", "add"):
             return self.register(event, rest, is_admin=is_admin)
         if action in ("unregister", "del", "remove", "rm"):
-            return self.unregister(event, is_admin=is_admin)
-        if action in ("status", "info"):
-            return self.status(event)
+            return self.unregister(event, rest, is_admin=is_admin)
+        if action in ("on", "enable", "resume", "start"):
+            return self.toggle(event, rest, enabled=True, is_admin=is_admin)
+        if action in ("off", "disable", "pause", "stop"):
+            return self.toggle(event, rest, enabled=False, is_admin=is_admin)
+        if action in ("status", "info", "show"):
+            return self.status(event, rest)
         if action in ("list", "ls", "groups"):
             return self.list_groups()
         if action in ("threshold", "thr"):
             return self.set_threshold(event, rest, is_admin=is_admin)
-        if action in ("pause", "off", "stop"):
-            return self.toggle(event, enabled=False, is_admin=is_admin)
-        if action in ("resume", "on", "start"):
-            return self.toggle(event, enabled=True, is_admin=is_admin)
+        if action in ("purge", "drop"):
+            return self.purge(event, rest, is_admin=is_admin)
         if action in ("help", "h", "?"):
             return CommandResult(HELP_TEXT)
         return CommandResult(f"Unknown subcommand: {action}\n\n{HELP_TEXT}", ok=False)
+
+    # ------------------------------------------------------------------ 目标解析
+    def _target(
+        self,
+        event: Any,
+        token: str,
+        *,
+        is_admin: bool,
+        want_unregistered: bool = False,
+        require_admin_off_session: bool = False,
+    ) -> tuple[GroupProfile | None, CommandResult | None]:
+        """解析目标群，并做权限检查。返回 (group, error)。"""
+        resolution = resolve(
+            self.storage, event, token, want_unregistered=want_unregistered
+        )
+
+        if resolution.status == "ambiguous":
+            return None, CommandResult(
+                render_ambiguous(resolution, self.storage), ok=False
+            )
+        if resolution.status == "empty":
+            return None, CommandResult(
+                "No target: run this inside a group or pass a group id.", ok=False
+            )
+        if resolution.status == "not_found":
+            hint = ""
+            if not token:
+                hint = " This session is not registered; run /shit register."
+            return None, CommandResult(
+                f"Target not found: {resolution.raw or '(current)'}.{hint}", ok=False
+            )
+
+        group = resolution.group
+        assert group is not None
+
+        # 操作别的群 = 管理员行为
+        off_session = token and group.group_key != current_origin(event)
+        if off_session and require_admin_off_session and not is_admin:
+            return None, CommandResult(
+                "Only an admin can change another group.", ok=False
+            )
+        return group, None
+
+    def _missing(self, group: GroupProfile, token: str) -> CommandResult:
+        return CommandResult(
+            f"Group {group.group_key} is not registered "
+            f"(/shit register in {token or group.group_key}).",
+            ok=False,
+        )
 
     # ------------------------------------------------------------------ 子指令
     def register(
         self, event: Any, args: list[str], *, is_admin: bool = False
     ) -> CommandResult:
-        group_key = unified_origin(event)
-        if not group_key:
-            return CommandResult("Only usable inside a group chat.", ok=False)
+        """`/shit register <in|out|both> [target] [threshold]`"""
+        direction_token = ""
+        target_token = ""
+        threshold_token = ""
 
-        raw_direction = args[0] if args else Direction.BOTH.value
+        for token in args:
+            lowered = token.lower()
+            if lowered in ("in", "out", "both"):
+                direction_token = lowered
+                continue
+            if _is_threshold(token):
+                threshold_token = token
+                continue
+            if looks_like_target(token) and not target_token:
+                target_token = token
+                continue
+            return CommandResult(
+                f"Unexpected argument: {token}\n\n{HELP_TEXT}", ok=False
+            )
+
+        direction_token = direction_token or Direction.BOTH.value
         try:
-            direction = Direction.parse(raw_direction)
+            direction = Direction.parse(direction_token)
         except ValueError as exc:
             return CommandResult(f"{exc} - use in / out / both", ok=False)
 
         threshold = 0.0
-        if len(args) > 1:
+        if threshold_token:
             try:
-                threshold = self.settings.parse_threshold(args[1])
+                threshold = self.settings.parse_threshold(threshold_token)
             except ValueError:
                 return CommandResult(
                     "Threshold must be 0-1 or a percentage, e.g. 0.8 or 80%", ok=False
                 )
 
-        group = self.storage.get_group(group_key)
-        name = group_name(event)
-        if group is None:
-            group = GroupProfile(
-                group_key=group_key,
-                name=name,
-                direction=direction,
-                threshold=threshold,
-            )
-        else:
+        group, error = self._target(
+            event,
+            target_token,
+            is_admin=is_admin,
+            want_unregistered=True,
+            require_admin_off_session=True,
+        )
+        if error:
+            return error
+        assert group is not None
+
+        existing = self.storage.get_group(group.group_key)
+        if existing is None:
             group.direction = direction
-            group.name = name or group.name
-            if len(args) > 1:
-                group.threshold = threshold
+            group.threshold = threshold
+            group.name = group.name or group.group_key
+        else:
+            existing.direction = direction
+            if threshold_token:
+                existing.threshold = threshold
+            group = existing
+
         self.storage.upsert_group(group)
-
-        confidence = confidence_score(
-            native_messages=group.native_message_count,
-            native_chars=group.native_char_count,
-            drift=0.0,
-            accepted=group.accepted_count,
-            rejected=group.rejected_count,
-            k=self.settings.confidence_k,
-        )
-        effective = self.settings.threshold_for(group.threshold)
         return CommandResult(
-            f"[ok] registered: {group.name or group_key}\n"
+            f"[ok] registered {describe_group(group)}\n"
             f"direction : {group.direction.value}\n"
-            f"confidence: {confidence:.2f} (threshold {effective:.2f})\n"
+            f"confidence: {self._confidence(group):.2f} "
+            f"(threshold {self.settings.threshold_for(group.threshold):.2f})\n"
             f"taste     : {describe_intake(group)}\n"
-            f"\n"
-            f"Confidence accrues from this group's own (native) shit samples.\n"
-            f"Only once it clears the threshold will it start receiving."
+            f"\nConfidence accrues from the group's own native shit samples."
         )
 
-    def unregister(self, event: Any, *, is_admin: bool = False) -> CommandResult:
-        group_key = unified_origin(event)
-        if not group_key:
-            return CommandResult("Only usable inside a group chat.", ok=False)
-        if self.storage.delete_group(group_key):
-            return CommandResult("[ok] this group left the network.")
-        return CommandResult("This group was not registered.", ok=False)
+    def unregister(
+        self, event: Any, args: list[str], *, is_admin: bool = False
+    ) -> CommandResult:
+        token = args[0] if args else ""
+        group, error = self._target(
+            event, token, is_admin=is_admin, require_admin_off_session=True
+        )
+        if error:
+            return error
+        assert group is not None
+        if self.storage.delete_group(group.group_key):
+            return CommandResult(f"[ok] removed {describe_group(group)}.")
+        return self._missing(group, token)
 
-    def status(self, event: Any) -> CommandResult:
-        group_key = unified_origin(event)
-        group = self.storage.get_group(group_key) if group_key else None
-        if group is None:
+    def toggle(
+        self, event: Any, args: list[str], *, enabled: bool, is_admin: bool = False
+    ) -> CommandResult:
+        """`/shit on <target>` / `/shit off <target>`"""
+        token = args[0] if args else ""
+        group, error = self._target(
+            event, token, is_admin=is_admin, require_admin_off_session=True
+        )
+        if error:
+            return error
+        assert group is not None
+        stored = self.storage.get_group(group.group_key)
+        if stored is None:
+            return self._missing(group, token)
+
+        stored.enabled = enabled
+        self.storage.upsert_group(stored)
+        verb = "enabled (relay on)" if enabled else "paused (silent)"
+        return CommandResult(f"[ok] {verb}: {describe_group(stored)}")
+
+    def purge(
+        self, event: Any, args: list[str], *, is_admin: bool = False
+    ) -> CommandResult:
+        if not is_admin:
+            return CommandResult("Admin only.", ok=False)
+        token = args[0] if args else ""
+        group, error = self._target(
+            event, token, is_admin=is_admin, require_admin_off_session=True
+        )
+        if error:
+            return error
+        assert group is not None
+        if self.storage.delete_group(group.group_key):
+            return CommandResult(f"[ok] purged {describe_group(group)}.")
+        return self._missing(group, token)
+
+    def status(self, event: Any, args: list[str] | None = None) -> CommandResult:
+        token = (args or [""])[0]
+        resolution = resolve(self.storage, event, token)
+        if resolution.status == "ambiguous":
+            return CommandResult(render_ambiguous(resolution, self.storage), ok=False)
+        if not resolution.ok:
             return CommandResult(
-                "This group is not registered. Run /shit register both to join.",
-                ok=False,
+                "Group not registered. Run /shit register both to join.", ok=False
             )
 
-        confidence = confidence_score(
-            native_messages=group.native_message_count,
-            native_chars=group.native_char_count,
-            drift=0.0,
-            accepted=group.accepted_count,
-            rejected=group.rejected_count,
-            k=self.settings.confidence_k,
-        )
+        group = resolution.group
+        assert group is not None
+        confidence = self._confidence(group)
         threshold = self.settings.threshold_for(group.threshold)
         state = "running" if group.enabled else "paused"
         verdict = "eligible" if confidence >= threshold else "not enough samples"
         return CommandResult(
-            f"group     : {group.name or group_key}\n"
+            f"group     : {describe_group(group)}\n"
             f"direction : {group.direction.value} ({state})\n"
             f"confidence: {confidence:.2f} (threshold {threshold:.2f}) -> {verdict}\n"
-            f"native    : {group.native_message_count} shit(s), {group.native_char_count} chars\n"
+            f"native    : {group.native_message_count} shit(s), "
+            f"{group.native_char_count} chars\n"
             f"accepted  : {group.accepted_count}  rejected: {group.rejected_count}\n"
             f"taste     : {describe_intake(group)}"
         )
@@ -167,69 +291,77 @@ class Commands:
         if not groups:
             return CommandResult("No group registered yet.")
         lines = [f"{len(groups)} group(s):"]
-        for group in groups:
-            confidence = confidence_score(
-                native_messages=group.native_message_count,
-                native_chars=group.native_char_count,
-                drift=0.0,
-                accepted=group.accepted_count,
-                rejected=group.rejected_count,
-                k=self.settings.confidence_k,
-            )
+        for index, group in enumerate(groups, start=1):
+            state = "" if group.enabled else " [paused]"
             lines.append(
-                f"- {group.name or group.group_key} | {group.direction.value} | "
-                f"conf {confidence:.2f} | native {group.native_message_count}"
+                f"#{index} {group.direction.value:<4} "
+                f"conf {self._confidence(group):.2f} "
+                f"native {group.native_message_count:<3} "
+                f"{group.name or '-'} <{group.group_key}>{state}"
             )
         return CommandResult("\n".join(lines))
 
     def set_threshold(
         self, event: Any, args: list[str], *, is_admin: bool = False
     ) -> CommandResult:
-        group_key = unified_origin(event)
-        group = self.storage.get_group(group_key) if group_key else None
-        if group is None:
-            return CommandResult("This group is not registered.", ok=False)
+        """`/shit threshold <0-1|xx%> [target]`"""
         if not args:
-            current = self.settings.threshold_for(group.threshold)
-            return CommandResult(f"Current threshold: {current:.2f}")
-        try:
-            value = self.settings.parse_threshold(args[0])
-        except ValueError:
+            return CommandResult("Usage: /shit threshold <0-1|xx%> [target]", ok=False)
+
+        value_token = args[0]
+        token = args[1] if len(args) > 1 else ""
+        if not _is_threshold(value_token):
             return CommandResult(
                 "Threshold must be 0-1 or a percentage, e.g. 0.8 or 80%", ok=False
             )
-        group.threshold = value
-        self.storage.upsert_group(group)
+        try:
+            value = self.settings.parse_threshold(value_token)
+        except ValueError:
+            return CommandResult("Bad threshold value.", ok=False)
+
+        group, error = self._target(
+            event, token, is_admin=is_admin, require_admin_off_session=True
+        )
+        if error:
+            return error
+        assert group is not None
+        stored = self.storage.get_group(group.group_key)
+        if stored is None:
+            return self._missing(group, token)
+
+        stored.threshold = value
+        self.storage.upsert_group(stored)
         return CommandResult(
-            f"[ok] threshold set to {self.settings.threshold_for(value):.2f}"
+            f"[ok] threshold {self.settings.threshold_for(value):.2f} "
+            f"for {describe_group(stored)}"
         )
 
-    def toggle(
-        self, event: Any, *, enabled: bool, is_admin: bool = False
-    ) -> CommandResult:
-        group_key = unified_origin(event)
-        group = self.storage.get_group(group_key) if group_key else None
-        if group is None:
-            return CommandResult("This group is not registered.", ok=False)
-        group.enabled = enabled
-        self.storage.upsert_group(group)
-        return CommandResult(
-            "[ok] resumed this group." if enabled else "[ok] paused this group."
+    # ------------------------------------------------------------------ 工具
+    def _confidence(self, group: GroupProfile) -> float:
+        return confidence_score(
+            native_messages=group.native_message_count,
+            native_chars=group.native_char_count,
+            drift=0.0,
+            accepted=group.accepted_count,
+            rejected=group.rejected_count,
+            k=self.settings.confidence_k,
         )
 
 
 # ---------------------------------------------------------------------- 工具
-def unified_origin(event: Any) -> str:
-    return str(getattr(event, "unified_msg_origin", "") or "")
+def _is_threshold(token: str) -> bool:
+    """判断参数是不是阈值。
 
-
-def group_name(event: Any) -> str:
-    obj = getattr(event, "message_obj", None)
-    name = getattr(obj, "group_name", "") or ""
-    if not name:
-        group_id = getattr(event, "get_group_id", lambda: "")()
-        name = f"group {group_id}" if group_id else "group"
-    return str(name)[:60]
+    群号与阈值都可能是一串数字，靠长度区分：阈值恒在 0-1 或 0-100 之间
+    （最多 3 位数 / 带小数点 / 带 %），群号一般是 5 位以上。
+    """
+    if token.endswith("%"):
+        token = token[:-1]
+    try:
+        float(token)
+    except ValueError:
+        return False
+    return "." in token or (token.isdigit() and len(token) <= 3)
 
 
 def is_group_event(event: Any) -> bool:
