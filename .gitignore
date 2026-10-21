@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+.Python
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Plugin runtime data (群注册表、偏好模型、缓存等，不入库)
+data/
+*.sqlite
+*.sqlite3
+*.db
+cache/
+
+# 本地环境与密钥
+.env
+.env.*
+config.local.*
+*.secret
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 签发前的临时文件
+*.log
