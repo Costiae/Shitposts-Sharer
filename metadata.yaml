@@ -4,7 +4,7 @@ desc: 识别群聊里的"屎"（合并转发、图片、B站分享等），分�
 help: 发送 /屎 查看指令帮助；/屎 注册 both 把本群加入搬运网络
 version: v0.1.0
 author: Costia
-repo: https://github.com/Costia/astrbot_plugin_shitposts_sharer
+repo: https://github.com/Costiae/Shitposts-Sharer
 astrbot_version: ">=4.26.0"
 support_platforms:
   - aiocqhttp

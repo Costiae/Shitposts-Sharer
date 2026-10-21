@@ -29,7 +29,7 @@ from .core.storage import Storage
     "Costia",
     "自动化搬屎：识别群里的屎，分析口味，搬到对味的群",
     "0.1.0",
-    "https://github.com/Costia/astrbot_plugin_shitposts_sharer",
+    "https://github.com/Costiae/Shitposts-Sharer",
 )
 class ShitpostsSharer(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:

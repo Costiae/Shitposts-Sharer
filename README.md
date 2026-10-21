@@ -76,7 +76,7 @@ AstrBot 扩展：监听已注册群的全部消息，识别"潜在的屎"（合�
 ```bash
 # 放进 AstrBot 的插件目录
 cd <AstrBot>/data/plugins
-git clone <repo> astrbot_plugin_shitposts_sharer
+git clone https://github.com/Costiae/Shitposts-Sharer.git astrbot_plugin_shitposts_sharer
 ```
 
 或在 WebUI「插件市场 → 安装插件」填仓库地址。
