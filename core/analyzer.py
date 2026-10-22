@@ -106,6 +106,19 @@ DEFAULT_CONTEXT_PROMPT = """下面是群聊里的一段对话。请判断这些�
 {anchors}
 }}"""
 
+DEFAULT_SAFETY_PROMPT = """只做安全判断，不要判断内容是否有趣。
+
+请看下面的图片，判断它是否涉及未成年人的性化内容（包括明显未成年角色、
+儿童外貌、校服/幼态化与性暗示的组合等）。
+
+只输出 JSON：
+{
+  "minor_sexual": true/false
+}
+
+如果图片与未成年人无关，输出 false。如果无法看清图片，输出 null；
+不要猜测。不要输出解释。"""
+
 DEFAULT_GROUP_PROMPT = """你在给一个群挑它会不会喜欢的屎。
 
 目标群：{group_name}
@@ -271,6 +284,41 @@ class Analyzer:
             umo=umo,
         )
 
+    # ------------------------------------------------------------ 安全
+    async def safety_check(self, message: Any, umo: str = "") -> bool | None:
+        """强制搬运图片前的安全判定。
+
+        正常流水线会复用 ``judge`` 返回的 ``minor_sexual``；``/shit relay``
+        这类调试入口不经过判定，所以单独补一次视觉安全检查。返回 ``None``
+        表示无法确认（没有视觉模型、没有图片 URL、模型不可用），调用方必须
+        按拦截处理，不能放行。
+        """
+        image_urls = [
+            seg.url
+            for seg in message.segments
+            if seg.kind == "image" and seg.url.startswith(("http", "file"))
+        ][: self.settings.max_images_per_message]
+        if not image_urls:
+            return None
+
+        data = await self.llm.generate_json(
+            DEFAULT_SAFETY_PROMPT,
+            system_prompt=SYSTEM,
+            image_urls=image_urls,
+            provider_id=str(self.settings.get("analysis_provider_id") or ""),
+            umo=umo,
+        )
+        if data is None:
+            return None
+        value = data.get("minor_sexual")
+        if value is None or (
+            isinstance(value, str)
+            and value.strip().lower() in ("null", "none", "unknown")
+        ):
+            # 模型明确表示看不清，或没有返回该字段：按“无法确认”处理。
+            return None
+        return as_bool(value)
+
     # ------------------------------------------------------------ 群契合度
     async def score_groups(
         self,
@@ -346,6 +394,26 @@ class Analyzer:
         return result
 
 
+def as_bool(value: Any, default: bool = False) -> bool:
+    """把模型常见的真假写法转成 bool。
+
+    ``bool("false")`` 是 True —— 如果模型把 ``minor_sexual`` 写成字符串
+    ``"false"``，直接 bool() 会把正常内容误判成安全拦截。这里只把明确的
+    真值字符串当成 True，其余交给 default。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("true", "1", "yes", "y", "on", "是"):
+            return True
+        if text in ("false", "0", "no", "n", "off", "否", ""):
+            return False
+    return default
+
+
 def parse_analysis(data: dict[str, Any]) -> Analysis:
     def as_float(key: str, default: float = 0.0) -> float:
         try:
@@ -355,22 +423,22 @@ def parse_analysis(data: dict[str, Any]) -> Analysis:
 
     def as_list(key: str) -> list[str]:
         value = data.get(key) or []
-        if isinstance(value, str):
+        if isinstance(value, str) or not isinstance(value, (list, tuple, set)):
             value = [value]
         return [str(item).strip() for item in value if str(item).strip()][:12]
 
     return Analysis(
-        is_shit=bool(data.get("is_shit", False)),
+        is_shit=as_bool(data.get("is_shit", False)),
         intensity=as_float("intensity"),
         tags=as_list("tags"),
         keywords=as_list("keywords"),
         reason=str(data.get("reason", ""))[:120],
-        context_relevant=bool(data.get("context_relevant", False)),
+        context_relevant=as_bool(data.get("context_relevant", False)),
         context_keywords=as_list("context_keywords"),
         topic_seed=str(data.get("topic_seed", ""))[:200],
         image_tags=as_list("image_tags"),
         characters=as_list("characters"),
         copyrights=as_list("copyrights"),
-        nsfw=bool(data.get("nsfw", False)),
-        minor_sexual=bool(data.get("minor_sexual", False)),
+        nsfw=as_bool(data.get("nsfw", False)),
+        minor_sexual=as_bool(data.get("minor_sexual", False)),
     )

@@ -82,16 +82,15 @@ class ShitpostsSharer(Star):
             early.skip("not a group message")
             return
 
-        message = message_from_event(
-            event, str(getattr(event, "unified_msg_origin", "") or "")
-        )
-        early.step(
-            f"EARLY {describe_message(message, limit=200)} "
-            f"wake={getattr(event, 'is_wake', '?')} "
-            f"at_or_wake={getattr(event, 'is_at_or_wake_command', '?')}"
-        )
-
         try:
+            message = message_from_event(
+                event, str(getattr(event, "unified_msg_origin", "") or "")
+            )
+            early.step(
+                f"EARLY {describe_message(message, limit=200)} "
+                f"wake={getattr(event, 'is_wake', '?')} "
+                f"at_or_wake={getattr(event, 'is_at_or_wake_command', '?')}"
+            )
             await self.pipeline.on_event(event)
         except Exception as exc:  # pragma: no cover - 绝不让异常冒到框架
             early.error(f"listener crashed: {type(exc).__name__}: {exc}")

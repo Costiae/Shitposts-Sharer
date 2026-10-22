@@ -55,7 +55,7 @@ Direction describes THE GROUP, not the plugin:
   receive   this group receives shit from other groups; it is never a source
   emit      this group produces shit that gets relayed out; it receives nothing
   both      this group both produces and receives
-Handling a group other than the current one requires admin."""
+Changing another group requires admin; status/list are read-only."""
 
 
 @dataclass(slots=True)
@@ -288,6 +288,11 @@ class Commands:
             outcome = runner(event, target_key, incoming)
         except Exception as exc:  # pragma: no cover - defensive
             return CommandResult(f"Force delivery failed: {type(exc).__name__}: {exc}", ok=False)
+        if isinstance(outcome, dict):
+            return CommandResult(
+                str(outcome.get("detail", outcome)),
+                ok=bool(outcome.get("ok", False)),
+            )
         return CommandResult(outcome if isinstance(outcome, str) else str(outcome))
 
     # ------------------------------------------------------------------ 目标解析
@@ -343,7 +348,7 @@ class Commands:
     def register(
         self, event: Any, args: list[str], *, is_admin: bool = False
     ) -> CommandResult:
-        """`/shit register <in|out|both> [target] [threshold]`"""
+        """`/shit register <receive|emit|both> [target] [threshold]`"""
         direction_token = ""
         target_token = ""
         threshold_token = ""

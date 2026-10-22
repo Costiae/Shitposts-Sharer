@@ -75,7 +75,18 @@ class Router:
 
             # 图片专属门：文字话题对上了不代表图对胃口。图片必须靠视觉
             # 标签（角色/IP/属性）单独过门槛，达不到就不搬。
-            if shit.image_vector:
+            # image_tagging 关闭时才允许退回纯文字匹配；开着却没有标签，
+            # 说明视觉模型没有返回可匹配的标签，不能把图当文本放行。
+            if shit.kind == Kind.IMAGE and self.settings.image_tagging:
+                if not shit.image_vector:
+                    plan.rejected.append(
+                        (
+                            group.group_key,
+                            "图片缺少视觉标签，无法通过图片门槛"
+                            "（检查 image_llm / image_tagging 与视觉模型）",
+                        )
+                    )
+                    continue
                 image_score, image_reason = self.matcher.image_match(shit, group)
                 if image_score <= 0:
                     plan.rejected.append(

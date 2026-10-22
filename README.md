@@ -3,22 +3,28 @@
 AstrBot 扩展：监听已注册群的全部消息，识别"潜在的屎"（合并转发、图片、B 站分享、离谱长文本），
 分析它和上下文的关系，比对各群的"吃屎偏好"与"可信度"，把屎搬到对味且够格的群。
 
+图片也会被抓取、打视觉标签，并走独立的图片匹配门槛；每个群还可以单独关掉图片搬运。
+
 > 适配 AstrBot **4.26+**（在 4.29.0 上开发）。
 
 ## 它怎么工作
 
 ```
-群消息 ──► 粗筛闸门 ──► 上下文窗口(90s) ──► 多模态 LLM 判屎
+群消息 ──► 粗筛闸门 ──► 上下文窗口(90s) ──► 多模态 LLM 判屎 + 打图片标签
                                               │
-              ┌───────────────────────────────┘
-              ▼
-        关键词向量(屎) ⇄ 关键词向量(群口味)  ── 粗筛候选群
-              │
-              ▼
-        LLM 复核候选群口味契合度  ── 过阈值就搬，多个群都过就都搬
-              │
-              ▼
-        去重(内容指纹) ──► 跨群发送（带上下文）
+                                              ├─ minor_sexual=true ──► 硬拦截，不入库
+                                              ▼
+                        文本关键词向量        图片标签向量
+                              │                    │
+                              ▼                    ▼
+                    文本匹配 ⇄ 群口味      图片匹配 ⇄ 群口味
+                              │                    │
+                              └────────┬───────────┘
+                                       ▼
+                    LLM 复核候选群 + 可信度/阈值/方向/单群图片开关
+                                       │
+                                       ▼
+                              去重(内容指纹) ──► 跨群发送（带上下文）
 ```
 
 ### 1. 什么算"屎"
@@ -26,8 +32,8 @@ AstrBot 扩展：监听已注册群的全部消息，识别"潜在的屎"（合�
 粗筛很松，真正的判断交给多模态 LLM：
 
 - **合并转发**（聊天记录，按 `forward_min_nodes` 过滤过短的）
-- **图片**（连同配文一起送给视觉模型）
-- **语音 / 视频 / 文件**
+- **图片**（连同配文一起送给视觉模型；要求 `image_llm=true`）
+- **语音 / 视频 / 文件**（`detect_media`）
 - **B 站分享**（BV 号 / b23 短链 / QQ 小程序卡片，另附视频标题、UP 主、时长、播放量）
 - **普通链接分享**（`detect_links`，默认开）
 - **够长的纯文本**（默认 ≥ 60 字）
@@ -44,14 +50,18 @@ AstrBot 扩展：监听已注册群的全部消息，识别"潜在的屎"（合�
 统一交给模型判断：这坨屎是被群友顺着什么话题引出来的？群友后来怎么接的？
 搬运时可以**把这段讨论一起带过去**（默认开，`with_context`）。
 
-### 3. 群档案与可信度
+同一个群在窗口期内连续命中多条候选时，会各自开一个窗口，后一条不会覆盖前一条。
+后续消息会同时进入这些窗口，直到各自到点收盘。
+
+### 3. 群档案、方向与可信度
 
 每个群登记：
 
 | 字段 | 说明 |
 | --- | --- |
 | 方向 | `receive` 只收 / `emit` 只发 / `both` 进出 |
-| 口味 | 关键词向量，由该群**吃过的屎**（判为 `is_shit` 的内容）累积而成 |
+| 口味 | 关键词向量，由该群**自己产的**、被判为 `is_shit` 的内容累积而成 |
+| 图片开关 | 该群是否参与图片搬运，默认开；关闭后不产也不收图片，文本不受影响 |
 | 可信度 | 由**样本量**、**偏移度**、**采纳率**共同决定 |
 
 > **方向描述的是「这个群」，不是插件。**
@@ -62,6 +72,17 @@ AstrBot 扩展：监听已注册群的全部消息，识别"潜在的屎"（合�
 >
 > 字段值与 `can_receive` / `can_emit` 同名对齐。旧版本的 `in` / `out` 会在
 > 插件加载时自动迁移为 `receive` / `emit`，已注册的群无需重新登记。
+
+**冷启动**：匹配分来自「屎的向量」和「群口味向量」的余弦。口味为空的群，
+关键词分是 0，因此不会收到任何搬运。纯 `receive` 群自己不产内容，也就不会
+积累原生口味，建议：
+
+1. 先以 `both` 运行一段时间，让群自己产生几条被判为屎的内容；或
+2. 管理员用 `/shit intake <target>` 把一条有代表性的消息喂进目标群口味；然后
+3. 再切到 `receive`。
+
+另外，`threshold_overall > 0` 时，纯 `receive` 群没有原生样本，可信度恒为 0，
+会被可信度门槛挡住。这类群建议保持全局阈值为 0，或先积累原生样本。
 
 可信度公式（`core/profile.py`）：
 
@@ -75,21 +96,34 @@ AstrBot 扩展：监听已注册群的全部消息，识别"潜在的屎"（合�
 
 偏移度会做指数平滑后存进群档案（`drift`），因此**路由判定、`/shit status`、
 `/shit debug` 用的是同一个 `GroupProfile.confidence()`**，不会出现
-“状态说够格、实际却不搬”的矛盾。老库在加载时自动补 `drift` 列。
+“状态说够格、实际却不搬”的矛盾。老库在加载时自动补 `drift` 和
+`image_enabled` 列。
+
+> 拒绝计数目前没有自动反馈入口（`apply_rejection` 只是预留），
+> 所以采纳率通常是 100%。它不会凭空降低可信度。
 
 "可信度"只是**防样本过少而武断搬屎**的温和惩罚，不是精度核心。
 
 ### 4. 匹配与搬运
 
-两种匹配来源**都实现了**，由配置开关组合：
+匹配由两层组成：
 
-- **关键词向量**（默认开，零成本）：余弦相似度过阈值即合格，阈值下方留容差带
-- **相似关键词合并**：`抽象 / 抽象话 / 抽象人` 这类同一概念的写法只计一次权，
-  避免一个方向被重复累加（阈值 `keyword_merge_threshold`，默认 0.6）。
-  **每次新增关键词都会把整张口味表重新合并一遍**，之前登记过的老词条也会收敛。
-- **LLM 复核**（默认开）：关键词粗筛出前 N 个群，把候选清单注入提示词让模型打分
+- **关键词向量**（始终启用，零成本）：余弦相似度过阈值即合格，阈值下方留容差带
+- **LLM 复核**（`llm_rerank`，默认开）：关键词粗筛出前 N 个群，把候选清单注入提示词让模型打分；
+  只有当前上下文里存在可用的 chat provider 时才会执行
 
-门槛：`口味匹配分` 与 `群可信度` 分别过各自阈值 → 全部搬运（可设 `max_targets` 限流）。
+相似关键词会合并：`抽象 / 抽象话 / 抽象人` 这类同一概念的写法只计一次权，
+避免一个方向被重复累加（阈值 `keyword_merge_threshold`，默认 0.6）。
+**每次新增关键词都会把整张口味表重新合并一遍**，之前登记过的老词条也会收敛。
+
+门槛分三层，互不替代：
+
+1. **关键词分**：`keyword_threshold` / `keyword_tolerance`，低于容差带直接淘汰；
+2. **图片分**：图片额外要求视觉标签向量达到 `image_match_threshold` /
+   `image_match_tolerance`，文字话题对上了也不能代替图片匹配；
+3. **可信度**：群可信度必须 ≥ `threshold_overall`（单群可用 `/shit threshold` 覆盖）。
+
+全部通过才会搬；多个群都过就都搬（可用 `max_targets` 限流）。
 同一条屎对同一个群只搬一次；**别人已经先搬过的也会被内容指纹拦下**。
 
 #### 图片标签与匹配
@@ -97,18 +131,27 @@ AstrBot 扩展：监听已注册群的全部消息，识别"潜在的屎"（合�
 色图、二次元图也算“屎”，和文本走同一套搬运流程，但多一道独立门：
 
 - 模型给图片打**视觉标签**：角色名、作品/IP、属性（发色/服装/姿势/场景）、画风
-  （`image_tagging`，默认开）
+  （`image_tagging`，默认开；要求 `image_llm=true` 且模型支持视觉）
 - 图片的标签向量必须单独达到 `image_match_threshold`（默认 0.6，容差 0.12）
   才允许搬给该群；**文字话题对上了也不能代替图片匹配**
-- 群的口味同样会从图片标签里学习：某个群吃过的图，会让它以后更容易收到同角色/IP 的图
+- `image_tagging` 开着但模型没有返回可用标签时，图片会被图片门槛拒绝，
+  不会退化成纯文本匹配放行
+- 关掉 `image_tagging` 后，图片退回纯文本匹配，但 `image_llm` 仍需开启，
+  否则无法做视觉安全检查，图片消息会直接跳过
+- 群自己发过的图会进入该群口味；目标群收到的图不会反向改写它的口味，
+  避免搬运内容把接收群的口味带歪
 - 成人向图片会在标签里带上 `NSFW`，方便按群口味区分
 - **每个群有独立的图片开关**（默认开）：`/shit image on|off [target]`。
   关闭后这个群既不产图片屎，也不收图片屎，文本搬运完全不受影响；
   `/shit status` 和 `/shit list` 会显示图片开关状态
-- **安全硬拦截**：涉及未成年人的性化内容永不搬运、不入库、不参与口味学习，
-  没有配置开关
+- **安全硬拦截**：直接图片中涉及未成年人的性化内容永不自动搬运、不入库、
+  不参与口味学习，没有配置开关；`/shit relay` 强制搬运图片时也会额外做一次
+  安全检查，无法确认时一律拒绝
 
 图片的内容指纹使用图片 URL + 标签，避免“同标签不同图”被误判成重复。
+
+> 合并转发里的图片目前不单独拆出来打视觉标签，仍按“转发整体”走文本流程；
+> 图片开关和直图安全门只作用于顶层图片消息。
 
 ## 安装
 
@@ -120,6 +163,9 @@ git clone https://github.com/Costiae/Shitposts-Sharer.git astrbot_plugin_shitpos
 
 或在 WebUI「插件市场 → 安装插件」填仓库地址。
 Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重载插件即可，无需重建镜像。
+
+数据库默认在 AstrBot 的 `data/plugin_data/shitposts_sharer/shitposts.sqlite3`；
+拿不到 AstrBot data 路径时退到插件目录下的 `data/`。
 
 ## 使用
 
@@ -140,59 +186,100 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 | --- | --- |
 | `/shit register <receive\|emit\|both> [target] [threshold]` | 加入搬运网络，默认 `both`，阈值可写 `0.8` 或 `80%` |
 | `/shit unregister [target]` | 移出网络 |
-| `/shit on <target>` | 开启该群搬运 |
-| `/shit off <target>` | 暂停该群搬运（静默） |
-| `/shit image [on\|off] [target]` | 单群图片搬运开关；省略 on/off 时查看状态 |
-| `/shit status [target]` | 口味、可信度、是否够格收屎 |
-| `/shit list` | 所有群一览（带 `#序号`） |
+| `/shit on [target]` | 开启该群搬运 |
+| `/shit off [target]` | 暂停该群搬运（静默） |
+| `/shit image [on\|off] [target]` | 单群图片搬运开关；省略 on/off 时查看状态（别名 `img` / `pic`） |
+| `/shit status [target]` | 口味、可信度、方向、图片开关、是否够格收屎 |
+| `/shit list` | 所有群一览（带 `#序号` 和 `[paused]` / `[image off]` 标记） |
 | `/shit threshold <0-1\|xx%> [target]` | 设单群阈值 |
 | `/shit purge [target]` | 彻底删除该群记录（仅管理员） |
 | `/shit help` | 帮助 |
 
-调试指令（全部仅管理员，会真实发消息）：
+调试指令（全部仅管理员）：
 
-| 指令 | 说明 |
-| --- | --- |
-| `/shit debug [target]` | 摊开每一道闸门：插件开关、群是否注册、方向、可信度 vs 阈值、LLM 是否可用、待处理窗口数 |
-| `/shit tags [target]` | 导出群的口味词表（省略则汇总所有群） |
-| `/shit relay [target]` | **无条件搬出**：忽略方向/口味/可信度/LLM 复核，直接推到目标群 |
-| `/shit intake [target]` | **无条件搬入**：只更新目标群口味，不往外发 |
-| `/shoot <文本>` | 把一段文本直接丢进判定流水线 |
+| 指令 | 说明 | 会发消息 / 改数据 |
+| --- | --- | --- |
+| `/shit debug [target]` | 摊开每一道闸门：插件开关、群是否注册、方向、可信度 vs 阈值、LLM 是否可用、待处理窗口数 | 只读 |
+| `/shit tags [target]` | 导出群的口味词表（省略则汇总所有群） | 只读 |
+| `/shit relay [target]` | **无条件搬出**：忽略方向/口味/可信度/LLM 复核；不指定 target 时推到所有已启用群（源群除外） | 会发消息；图片仍过安全检查，遵守图片开关与 `dry_run` |
+| `/shit intake [target]` | **无条件搬入**：只更新目标群口味，不往外发 | 会改口味，不发消息 |
+| `/shoot <文本>` | 把一段文本直接丢进判定流水线 | 可能发消息 |
 
 > `relay` / `intake` 描述的是**这条消息**的去向，与 `receive` / `emit`
 > （描述**群**的角色）是两个不同的维度，所以刻意用了不同的词。
 
-**权限**：操作当前群不需要管理员（群友自助注册）；`<target>` 指向别的群时必须是管理员。
+**权限**：
+
+- 操作**当前群**不需要管理员（群友可自助注册、开关自己的群）
+- `<target>` 指向别的群时，修改类指令需要管理员
+- `debug` / `tags` / `relay` / `intake` / `shoot` 仅管理员
+- `status` / `list` 是只读查询，不强制管理员
 
 `/shit` 的别名：`/spam`、`/ss`。
 
-## 配置要点（WebUI）
+## 配置（WebUI）
+
+### 触发与输入
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `log_level` | normal | `off` / `normal` / `full`，见下节 |
-| `judge_timeout_sec` | 180 | 单条判定超时，防止一条卡死拖垮收盘循环 |
 | `enabled` | true | 总开关 |
 | `watch_only_registered` | true | 只处理已注册群 |
 | `text_min_chars` | 60 | 长文本触发阈值 |
 | `loose_detect` | true | 松闸门：中等文本 + 带梗短句也送审 |
 | `soft_text_min_chars` | 24 | 松闸门的文本阈值 |
-| `detect_links` / `detect_media` | true | 普通链接、语音/视频/文件是否送审 |
+| `detect_links` | true | 普通 http(s) 链接是否送审 |
+| `detect_media` | true | 语音 / 视频 / 文件是否送审 |
+| `forward_min_nodes` | 1 | 合并转发最少几条才值得看 |
 | `expand_forward` | true | 自动调 `get_forward_msg` 展开合并转发 |
-| `shit_min_intensity` | 0.45 | 离谱分低于此值不搬 |
-| `window_seconds` | 90 | 上下文聚合窗口 |
-| `confidence_k` | 10 | 可信度下限参数 |
-| `keyword_threshold` / `keyword_tolerance` | 0.75 / 0.10 | 关键词匹配的阈值与容差带 |
-| `keyword_merge_threshold` | 0.6 | 相似关键词合并阈值（每次更新重合并整张口味表） |
-| `image_llm` | true | 把图片一起送给视觉模型 |
-| `image_tagging` | true | 给图片打角色 / IP / 属性 / 风格标签 |
+| `trigger_cooldown_sec` | 30 | 同一群两次开窗的最小间隔，避免刷屏 |
+| `image_llm` | true | 把图片交给视觉模型；关闭后图片不自动搬运 |
 | `max_images_per_message` | 4 | 单条消息最多分析几张图 |
-| `image_match_threshold` / `image_match_tolerance` | 0.6 / 0.12 | 图片标签独立门槛：达不到不搬，文字匹配不能代替 |
-| `llm_rerank` | true | 用 LLM 复核候选群 |
+| `image_tagging` | true | 给图片打角色 / IP / 属性 / 风格标签，并用独立图片门槛 |
+
+### 上下文与判定
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `history_max_messages` | 40 | 为判断上下文关系保留的历史条数 |
+| `window_seconds` | 90 | 命中候选后的聚合窗口（最小 5 秒） |
+| `max_messages_per_shit` | 20 | 一个窗口最多吸收多少条后续消息 |
+| `judge_timeout_sec` | 180 | 单条判定超时，防止一条卡死拖垮收盘循环 |
+| `shit_min_intensity` | 0.45 | 离谱分低于此值不搬 |
 | `with_context` | true | 搬运时附带群友讨论 |
+| `max_context_messages` | 6 | 附带几条上下文（0 会被当作 6） |
+| `shit_prompt` / `context_prompt` / `group_prompt` / `extra_prompt` | 空 | 自定义提示词；留空用内置 |
+
+### 匹配与路由
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `confidence_k` | 10 | 可信度下限参数；越大越需要原生样本 |
+| `threshold_overall` | 0 | 群可信度门槛；0 = 不拦。单群可用 `/shit threshold` 覆盖 |
+| `keyword_threshold` / `keyword_tolerance` | 0.75 / 0.10 | 文本关键词匹配的阈值与容差带 |
+| `keyword_merge_threshold` | 0.6 | 相似关键词合并阈值（每次更新重合并整张口味表） |
+| `image_match_threshold` / `image_match_tolerance` | 0.6 / 0.12 | 图片标签独立门槛；文字匹配不能代替 |
+| `llm_rerank` | true | 关键词粗筛后用 LLM 复核候选群 |
+| `llm_candidates` | 3 | 进入 LLM 复核的前 N 个候选群 |
+| `max_targets` | 0 | 单条屎最多搬几个群；0 = 不限 |
+
+### 搬运与模型
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
 | `anon_source` | true | 不显示屎来自哪个群 |
-| `dry_run` | false | 演练模式：只判定记录，不真发 |
-| `shit_prompt` / `context_prompt` / `group_prompt` / `extra_prompt` | 空 | 自定义提示词 |
+| `source_label` | 【搬屎】 | 搬运消息前缀；留空回退默认值 |
+| `dry_run` | false | 演练模式：只判定记录，不真发；强制搬出也遵守 |
+| `analysis_provider_id` | 空 | 分析用模型；留空用 AstrBot 默认对话模型 |
+| `embedding_provider_id` | 空 | 保留字段，当前未使用 |
+| `bili_info` | true | 抓取 B 站视频标题 / UP 主 / 时长 / 播放量 |
+| `proxy` | 空 | 抓 B 站信息时的可选代理，如 `http://127.0.0.1:7890` |
+
+### 日志
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `log_level` | normal | `off` / `normal` / `full`，见下节 |
 
 ## 日志
 
@@ -200,8 +287,8 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 
 | 级别 | 输出内容 |
 | --- | --- |
-| `off` | 只写最终搬运结果 |
-| `normal`（默认） | 每条消息**是否被俘获**，没被俘获的说明**卡在哪道闸门** |
+| `off` | 只写最终搬运结果；`Trace` 不输出闸门与步骤 |
+| `normal`（默认） | 每条消息是否被俘获；没被俘获的直接写出卡在哪道闸门；判定与投递结果 |
 | `full` | 上面全部 + 解码后的分段、转发展开情况、模型输入摘要、模型原始判定、关键词、候选群打分、逐群投递结果、完整 trail |
 
 阶段依次为 `entry`（AstrBot 交给插件）→ `group`（群是否注册/启用）→
@@ -221,10 +308,37 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 **关键**：如果群里发了消息，但日志里连 `[shit] entry` 都没有，说明消息在到
 插件之前就被 AstrBot 拦掉了（未唤醒 / 白名单 / 平台没上报）—— 这不是插件的问题。
 
+## 故障排查
+
+### 图片没有被搬
+
+按顺序检查：
+
+1. 源群和目标群的图片开关：`/shit status [target]` 里的 `image:` 是否为 `on`；
+2. `image_llm` 是否为 true，分析模型是否支持视觉；
+3. 日志里是否有 `image tags: ...`；如果为空，检查模型是否按提示词返回了
+   `image_tags` / `characters` / `copyrights`；
+4. 目标群是否有图片口味样本：`/shit tags [target]`；
+5. `/shit debug [target]` 看图片门槛和可信度；
+6. 如果看到 `该群未启用图片搬运`，用 `/shit image on [target]` 打开。
+
+### 抓到了但之后没有结果
+
+大概率是 90 秒窗口没有收盘，或单条判定超时。见下节。
+
+### 新群 / receive 群什么都不收
+
+口味为空时匹配分为 0，这是防误投而不是故障。先给群喂口味样本：
+`both` 运行一段时间，或管理员用 `/shit intake <target>` 播种。
+
+### 日志里没有 `entry`
+
+消息在插件之前就被 AstrBot 拦掉了。检查唤醒、白名单、平台适配器。
+
 ## 收盘循环的健壮性
 
 「抓到了东西，但之后既没有 result 也没有错误」是这个插件最容易出现的故障。
-原因一定是 90 秒窗口没能收盘。`_ticker` 为此做了四重保护：
+原因通常是窗口没能收盘。`_ticker` 为此做了四重保护：
 
 | 保护 | 日志 | 作用 |
 | --- | --- | --- |
@@ -233,7 +347,8 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 | 上一轮未返回 | `ticker \| flush still running ...` | 长 LLM 重试导致的空转不再伪装成安静 |
 | 单条超时 | `judge \| TIMEOUT after 180s` | 一条卡住不拖死整个循环 |
 
-`/shit debug` 会直接给出 `ticker alive` 和 `flush blocked` 两项状态，不用猜。
+`/shit debug` 会直接给出 `ticker alive`、`flush blocked` 和 `open windows`，
+不用猜。
 
 ## 依赖
 
@@ -248,8 +363,9 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 python -m unittest discover -s tests -t . -v
 ```
 
-> 本机没有 `astrbot` 包，测试用替身覆盖 `Plain` 组件；
-> 核心逻辑（向量、可信度、路由、存储、上下文窗口、流水线）全部可在纯 Python 下测试。
+当前 180 个测试。测试不需要 `astrbot` 包：发送组件用替身覆盖，
+核心逻辑（向量、可信度、路由、存储、上下文窗口、流水线、图片门槛、
+安全拦截、群图片开关、迁移）全部可在纯 Python 下测试。
 
 目录：
 
@@ -259,18 +375,21 @@ metadata.yaml      # 插件元数据
 _conf_schema.json  # WebUI 配置表单
 core/
   models.py        # 数据结构（GroupProfile / ShitRecord / Message ...）
-  storage.py       # SQLite：群、屎、搬运记录、设置
+  storage.py       # SQLite：群、屎、搬运记录、设置、schema 迁移
   config.py        # 配置读取与阈值解析
-  vector.py        # 关键词向量：分词、加权、余弦、容差打分
+  vector.py        # 关键词向量：分词、加权、余弦、容差、全表合并
   profile.py       # 口味更新与可信度公式
-  similarity.py    # 关键词/LLM 两种匹配来源
+  similarity.py    # 关键词匹配与图片标签匹配
   detector.py      # 候选识别（转发/图片/B站/长文本）
+  forward.py       # OneBot 合并转发展开
   bili.py          # B 站信息抓取（软依赖 + 直连 + 降级）
-  accumulator.py   # 上下文窗口
+  accumulator.py   # 上下文窗口（同群多窗口）
   llm.py           # LLM 调用与 JSON 解析
-  analyzer.py      # 判屎 / 上下文关系 / 群契合度 三套提示词
-  router.py        # 搬运路由
+  analyzer.py      # 判屎 / 上下文关系 / 群契合度 / 图片安全检查
+  router.py        # 搬运路由（文本门、图片门、可信度、群开关）
   sender.py        # 跨群消息组装与发送
+  targets.py       # <target> 解析（群号 / UMO / #序号 / 群名）
+  tracelog.py      # 分阶段日志与 trail
   commands.py      # /shit 指令（纯 ASCII）
   pipeline.py      # 串起一切
 tests/             # unittest

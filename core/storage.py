@@ -391,7 +391,7 @@ class Storage:
             return False
         return True
 
-    def already_delivered(self,shit_id: str, group_key: str) -> bool:
+    def already_delivered(self, shit_id: str, group_key: str) -> bool:
         row = self._conn.execute(
             "SELECT 1 FROM deliveries WHERE shit_id = ? AND group_key = ? LIMIT 1",
             (shit_id, group_key),

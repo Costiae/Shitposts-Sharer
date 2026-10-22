@@ -136,6 +136,26 @@ class TestDebugCommands(unittest.TestCase):
         self.assertIn(GROUP_B, result.text)
         sent_groups = [key for key, _ in self.context.sent]
         self.assertIn(GROUP_B, sent_groups)
+        # 不指定 target 时，不能把屎原样回声给源群
+        self.assertNotIn(GROUP_A, sent_groups)
+
+    def test_forceout_respects_dry_run(self):
+        self._register_all_groups()
+        self.settings.raw["dry_run"] = True
+        result = self.commands.dispatch(self.event, ["relay"], is_admin=True)
+        self.assertTrue(result.ok, result.text)
+        self.assertIn("DRY RUN", result.text)
+        self.assertEqual(self.context.sent, [])
+
+    def test_forceout_image_requires_safety_check(self):
+        self._register_all_groups()
+        self.event.message_obj.message = [
+            type("Img", (), {"type": "image", "url": "http://x/forced.png"})()
+        ]
+        result = self.commands.dispatch(self.event, ["relay"], is_admin=True)
+        self.assertFalse(result.ok)
+        self.assertIn("safety check unavailable", result.text)
+        self.assertEqual(self.context.sent, [])
 
     def test_forceout_with_target(self):
         self._register_all_groups()

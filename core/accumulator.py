@@ -48,8 +48,11 @@ class ContextAccumulator:
         self.settings = settings
         # group_key -> 最近消息（用于“前文”）
         self._history: dict[str, deque[ContextMessage]] = {}
-        # group_key -> 正在积累的现场
-        self._open: dict[str, Suspicion] = {}
+        # group_key -> 正在积累的现场列表。
+        # 同一个群在窗口期内可能连续命中多条候选；如果只保留一个，
+        # 后一条会把前一条覆盖掉，前一条永远不会收盘。所以这里按列表
+        # 保存，due() 会把到点的窗口全部交出去。
+        self._open: dict[str, list[Suspicion]] = {}
 
     # ---------------------------------------------------------------- 输入
     def observe(
@@ -74,8 +77,9 @@ class ContextAccumulator:
         )
         history.append(entry)
 
-        suspicion = self._open.get(message.group_key)
-        if suspicion is not None and not suspicion.closed:
+        for suspicion in self._open.get(message.group_key, []):
+            if suspicion.closed:
+                continue
             if message is not suspicion.message:
                 suspicion.extra_messages.append(message)
                 if len(suspicion.extra_messages) >= self.settings.max_messages_per_shit:
@@ -95,22 +99,29 @@ class ContextAccumulator:
             context_before=[item for item in before],
             trace=trace,
         )
-        self._open[message.group_key] = suspicion
+        self._open.setdefault(message.group_key, []).append(suspicion)
         return suspicion
 
     # ---------------------------------------------------------------- 收盘
     def due(self, now: float | None = None) -> list[tuple[str, Suspicion]]:
-        """返回已经到点、可以送去分析的现场。"""
+        """返回已经到点、可以送去分析的现场（同一群可以一次多个）。"""
         moment = now or time.time()
         ready: list[tuple[str, Suspicion]] = []
-        for group_key, suspicion in list(self._open.items()):
-            if suspicion.closed or suspicion.age(moment) >= self.settings.window_seconds:
-                ready.append((group_key, suspicion))
+        for group_key, bucket in list(self._open.items()):
+            keep: list[Suspicion] = []
+            for suspicion in bucket:
+                if suspicion.closed or suspicion.age(moment) >= self.settings.window_seconds:
+                    ready.append((group_key, suspicion))
+                else:
+                    keep.append(suspicion)
+            if keep:
+                self._open[group_key] = keep
+            else:
                 self._open.pop(group_key, None)
         return ready
 
     def pending(self) -> int:
-        return len(self._open)
+        return sum(len(bucket) for bucket in self._open.values())
 
     def drop(self, group_key: str) -> None:
         self._open.pop(group_key, None)

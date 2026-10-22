@@ -20,7 +20,6 @@ from .config import Settings
 from .detector import (
     expand_forward,
     is_there_a_shit,
-    looks_like_image_only,
     message_from_event,
 )
 from .llm import LLMClient
@@ -283,6 +282,16 @@ class Pipeline:
         message = self._enrich(message)
         self.accumulator.observe(message, has_bili=bool(self._bili_refs(message.text())))
 
+        # 图片必须经过视觉模型：没有视觉输入就无法打标签，也无法做
+        # minor_sexual 安全检查，因此直接不进入判定，而不是退化成纯文本放行。
+        if message.kind_hint() == "image":
+            if not self.settings.image_llm:
+                trace.skip("image_llm disabled; image cannot be inspected")
+                return
+            if group is not None and not group.image_enabled:
+                trace.skip("image relay disabled for this group")
+                return
+
         if group is not None and not group.direction.can_emit:
             # receive 群：它自己说的话不往外搬，但消息仍进上下文（作为语境）
             trace.skip(f"group is receive-only, message kept as context only")
@@ -338,6 +347,9 @@ class Pipeline:
         message = suspicion.message
         # 图片开关对源群同样生效：关掉后这个群产出的图不再进入判定。
         # 文本消息不受影响。
+        if message.kind_hint() == "image" and not self.settings.image_llm:
+            trace.skip("image_llm disabled; image cannot be inspected")
+            return None
         if (
             group is not None
             and not group.image_enabled
@@ -433,6 +445,9 @@ class Pipeline:
             )
             if analysis.nsfw:
                 image_tags.append("NSFW")
+            # NSFW 是追加项，也要参与合并：模型可能已经返回 nsfw/NSFW，
+            # 不合并会让同一个 token 在向量里被重复加权。
+            image_tags = merge_similar_keywords(image_tags, threshold=merge_threshold)
             if image_tags:
                 trace.step(f"image tags: {image_tags} nsfw={analysis.nsfw}")
 
@@ -690,6 +705,28 @@ class Pipeline:
         if message is None:
             return {"ok": False, "detail": "no session"}
 
+        # 强制入口不经过 judge，但图片仍必须先过安全闸门。
+        # 无法确认（没有视觉模型 / 模型失败 / 看不到图）时一律拒绝，
+        # 不能因为管理员执行了 /shit relay 就绕过 minor_sexual 硬拦截。
+        if message.has_image():
+            if not self.settings.image_llm:
+                return {
+                    "ok": False,
+                    "detail": "image relay blocked: image_llm is disabled",
+                }
+            unsafe = await self.analyzer.safety_check(message, message.group_key)
+            if unsafe is None:
+                return {
+                    "ok": False,
+                    "detail": "image relay blocked: safety check unavailable",
+                }
+            if unsafe:
+                self.stats.blocked_safety += 1
+                return {
+                    "ok": False,
+                    "detail": "image relay blocked: sexualized minor content",
+                }
+
         text = message.text()
         group = self.storage.get_group(message.group_key)
         blob = normalize_text(text) or f"{message.kind_hint()}"
@@ -721,8 +758,21 @@ class Pipeline:
 
         delivered: list[str] = []
         failed: list[str] = []
+        dry_run = bool(self.settings.get("dry_run"))
         for item in groups:
             if not item.enabled:
+                continue
+            # 不把强制搬运原样回声给源群（除非管理员明确指定了它）。
+            if not target_key and item.group_key == message.group_key:
+                continue
+            # 图片开关是群级偏好，强制搬运也不覆盖它。
+            if record.kind == Kind.IMAGE and not item.image_enabled:
+                continue
+            if dry_run:
+                self.storage.record_delivery(
+                    record.shit_id, item.group_key, 1.0, 1.0, "forced", "dry_run"
+                )
+                delivered.append(item.group_key)
                 continue
             ok = await self._deliver(record, item, group)
             self.storage.record_delivery(
@@ -735,13 +785,14 @@ class Pipeline:
                 failed.append(item.group_key)
                 self.stats.failed += 1
 
+        prefix = "DRY RUN would deliver" if dry_run else "delivered"
         return {
             "ok": bool(delivered),
-            "detail": f"delivered={delivered or '-'} failed={failed or '-'}",
+            "detail": f"{prefix}={delivered or '-'} failed={failed or '-'}",
         }
 
-    def run(self, event: Any, target_key: str, incoming: bool) -> str:
-        """同步桥：指令层是同步的，这里把协程跑完并返回文本。"""
+    def run(self, event: Any, target_key: str, incoming: bool) -> dict[str, Any]:
+        """同步桥：指令层是同步的，这里把协程跑完并返回结构化结果。"""
         try:
             result = asyncio.run(
                 self.force_delivery(event, target_key, incoming)
@@ -760,9 +811,11 @@ class Pipeline:
             thread.join()
             result = box.get("value", {"ok": False, "detail": "worker failed"})
         except Exception as exc:  # pragma: no cover - defensive
-            return f"force failed: {type(exc).__name__}: {exc}"
+            return {"ok": False, "detail": f"force failed: {type(exc).__name__}: {exc}"}
 
-        return str(result.get("detail", result))
+        if isinstance(result, dict):
+            return result
+        return {"ok": bool(result), "detail": str(result)}
 
     # ------------------------------------------------------------------ 统计
     def describe_group(self, group: GroupProfile) -> str:
@@ -773,7 +826,7 @@ class Pipeline:
             f"方向：{group.direction.label()}（{group.direction.describe()}）",
             f"可信度：{confidence:.2f}"
             f"（原生屎 {group.native_message_count} 条 / {group.native_char_count} 字，"
-            f"偏移惩罚 {group.rejected_count} 次）",
+            f"被拒绝 {group.rejected_count} 次）",
             f"口味：{describe_intake(group)}",
         ]
         if recent:

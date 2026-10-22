@@ -96,6 +96,12 @@ class TestTraceLevels(unittest.TestCase):
         self.assertIn("CAUGHT long text", text)
         self.assertNotIn("hidden", text)
 
+    def test_normal_writes_skip_reason(self):
+        trace = Trace(self.logger, "normal")
+        trace.gate("detect")
+        trace.skip("too short")
+        self.assertIn("SKIP too short", self.logger.text())
+
     def test_full_writes_steps_and_skips(self):
         trace = Trace(self.logger, "full")
         trace.gate("detect")

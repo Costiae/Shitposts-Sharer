@@ -68,7 +68,7 @@
   "image_llm": {
     "description": "图片交给多模态模型",
     "type": "bool",
-    "hint": "开启后会把群消息里的图片一起发给模型（要求分析模型支持视觉）。",
+    "hint": "开启后会把群消息里的图片一起发给模型（要求分析模型支持视觉），并用于图片标签与 minor_sexual 安全检查。关闭后图片消息不再自动搬运，因为没有视觉输入就无法确认内容安全。",
     "default": true
   },
   "max_images_per_message": {
@@ -79,7 +79,7 @@
   "image_tagging": {
     "description": "给图片打视觉标签",
     "type": "bool",
-    "hint": "让模型输出角色 / 作品IP / 属性 / 风格标签，并单独用这些标签做口味匹配。关掉后图片仍可搬，但不会检查图片标签门槛。",
+    "hint": "让模型输出角色 / 作品IP / 属性 / 风格标签，并单独用这些标签做口味匹配。开启时图片必须拿到可匹配的标签，否则会被图片门槛拒绝；关掉后退回纯文本匹配。需要 image_llm 与支持视觉的模型。",
     "default": true
   },
   "trigger_cooldown_sec": {
@@ -216,6 +216,7 @@
   "max_context_messages": {
     "description": "附带几条上下文",
     "type": "int",
+    "hint": "搬运时随消息附带的前文条数；0 会被当作默认 6。",
     "default": 6
   },
   "anon_source": {
@@ -227,6 +228,7 @@
   "source_label": {
     "description": "搬运前缀",
     "type": "string",
+    "hint": "每条搬运消息开头的前缀；留空则回退为【搬屎】。",
     "default": "【搬屎】"
   },
   "bili_info": {

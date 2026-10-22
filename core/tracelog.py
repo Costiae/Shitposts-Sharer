@@ -76,7 +76,9 @@ class Trace:
         在默认配置里就是一个黑洞。
         """
         self.trail.append(f"{self.stage}: {reason}")
-        self._write("debug", self.stage, f"SKIP {reason}")
+        # normal 也要能直接看到“为什么没被俘获”；debug 级日志在默认
+        # AstrBot 日志级别下通常不可见，会让 log_level=normal 名不副实。
+        self._write("info", self.stage, f"SKIP {reason}")
 
     def caught(self, reason: str) -> None:
         """标记为潜在屎，进入分析。
@@ -92,7 +94,7 @@ class Trace:
     def step(self, text: str) -> None:
         """单步进展，只在 full 下输出。"""
         if self.level == "full":
-            self._write("debug", self.stage, text)
+            self._write("info", self.stage, text)
 
     def result(self, text: str) -> None:
         """最终结论，off 之外都写。"""

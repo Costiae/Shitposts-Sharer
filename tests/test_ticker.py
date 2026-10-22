@@ -314,9 +314,9 @@ class TestFlushSlowWarning(unittest.TestCase):
             return None
 
         _patch(pipe, "handle_suspicion", slow)
-        pipe.accumulator._open["g"] = acc.Suspicion(
-            message=Message(group_key="g", segments=[]), reason="t"
-        )
+        pipe.accumulator._open["g"] = [
+            acc.Suspicion(message=Message(group_key="g", segments=[]), reason="t")
+        ]
         asyncio.run(pipe.flush_due(now=time.time() + 9999))
         self.assertIn("blocked the loop", logger.text())
 

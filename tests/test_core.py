@@ -395,6 +395,35 @@ class TestAnalysisParsing(unittest.TestCase):
         )
         self.assertTrue(analysis.minor_sexual)
 
+    def test_string_false_is_not_treated_as_true(self):
+        # bool("false") == True 会误触发安全拦截，也会把普通消息当成屎。
+        analysis = parse_analysis(
+            {
+                "is_shit": "false",
+                "context_relevant": "false",
+                "nsfw": "false",
+                "minor_sexual": "false",
+            }
+        )
+        self.assertFalse(analysis.is_shit)
+        self.assertFalse(analysis.context_relevant)
+        self.assertFalse(analysis.nsfw)
+        self.assertFalse(analysis.minor_sexual)
+
+    def test_string_true_is_treated_as_true(self):
+        analysis = parse_analysis(
+            {
+                "is_shit": "true",
+                "context_relevant": "yes",
+                "nsfw": "1",
+                "minor_sexual": "true",
+            }
+        )
+        self.assertTrue(analysis.is_shit)
+        self.assertTrue(analysis.context_relevant)
+        self.assertTrue(analysis.nsfw)
+        self.assertTrue(analysis.minor_sexual)
+
 
 class TestConfidenceConsistency(unittest.TestCase):
     def test_group_confidence_matches_profile_formula(self):
@@ -512,6 +541,28 @@ class TestImageGate(unittest.TestCase):
         self.assertNotIn("text-only", plan.group_keys())
         self.assertIn("图片标签", dict(plan.rejected)["text-only"])
 
+    def test_image_without_tags_is_rejected_when_tagging_on(self):
+        shit = make_image_shit()
+        shit.image_tags = []
+        shit.image_vector = {}
+        group = self._group("likes", ["初音未来", "白丝"])
+        plan = self.router.keyword_plan(shit, [group], exclude={"g-source"})
+        self.assertNotIn("likes", plan.group_keys())
+        self.assertIn("缺少视觉标签", dict(plan.rejected)["likes"])
+
+    def test_image_falls_back_to_text_when_tagging_is_disabled(self):
+        settings = make_settings(
+            threshold_overall=0.0, image_tagging=False
+        )
+        router = Router(settings)
+        shit = make_image_shit()
+        shit.image_tags = []
+        shit.image_vector = {}
+        shit.vector = build_vector(["初音未来", "白丝"], "", 0.8)
+        group = self._group("likes", ["初音未来", "白丝"])
+        plan = router.keyword_plan(shit, [group], exclude={"g-source"})
+        self.assertIn("likes", plan.group_keys())
+
     def test_group_can_disable_image_relay(self):
         shit = make_image_shit()
         group = self._group("no-image", ["初音未来", "白丝"])
@@ -624,6 +675,22 @@ class TestAccumulator(unittest.TestCase):
         ready = acc.due(now=time.time() + 60)
         self.assertEqual(len(ready), 1)
         self.assertEqual(ready[0][0], "g")
+
+    def test_multiple_open_windows_in_one_group_are_not_dropped(self):
+        settings = make_settings(window_seconds=10)
+        acc = ContextAccumulator(settings)
+        first = Message(group_key="g", segments=[Segment(kind="plain", text="第一条")])
+        second = Message(group_key="g", segments=[Segment(kind="plain", text="第二条")])
+        acc.observe(first)
+        one = acc.open(first, "长文本")
+        acc.observe(second)
+        two = acc.open(second, "图片")
+
+        self.assertEqual(acc.pending(), 2)
+        self.assertIn("第二条", acc.render_extra(one))
+        ready = acc.due(now=time.time() + 60)
+        self.assertEqual({id(item) for _, item in ready}, {id(one), id(two)})
+        self.assertEqual(acc.pending(), 0)
 
 
 if __name__ == "__main__":
