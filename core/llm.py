@@ -70,6 +70,26 @@ def extract_json(text: str) -> dict[str, Any] | None:
     return None
 
 
+def provider_id_of(provider: Any) -> str:
+    """从 AstrBot Provider 实例里取出它的 id。
+
+    AstrBot 把 id 放在 ``provider_config["id"]`` 里；不同版本可能只把
+    它挂在 ``id`` 属性上，所以两条路都试。
+    """
+    if provider is None:
+        return ""
+    config = getattr(provider, "provider_config", None)
+    if isinstance(config, dict):
+        value = config.get("id")
+        if value:
+            return str(value)
+    for attr in ("id", "provider_id"):
+        value = getattr(provider, attr, None)
+        if value:
+            return str(value)
+    return ""
+
+
 class LLMClient:
     """薄封装，方便在测试里替换成假的 context。"""
 
@@ -80,6 +100,50 @@ class LLMClient:
     def available(self) -> bool:
         return hasattr(self.context, "llm_generate")
 
+    async def _resolve_provider_id(self, umo: str = "") -> str:
+        """解析“当前对话模型”的 id。
+
+        ``context.llm_generate`` 的 ``chat_provider_id`` 是必填的
+        keyword-only 参数（见 AstrBot ``astrbot/core/star/context.py``）：
+
+            async def llm_generate(self, *, chat_provider_id: str, ...)
+
+        配置留空时如果不显式解析一个 id，就会抛
+        ``TypeError: missing required keyword argument 'chat_provider_id'``，
+        被下面的兜底吞成空文本，最终表现为“模型输出无法解析”。
+        """
+        # 4.29 起同步版已 deprecated，优先用异步版
+        getter = getattr(self.context, "get_using_provider_async", None)
+        if callable(getter):
+            for call in (lambda: getter(umo=umo or None), getter):
+                try:
+                    provider = call()
+                    if hasattr(provider, "__await__"):
+                        provider = await provider
+                except (TypeError, ValueError):
+                    continue
+                except Exception:
+                    continue
+                resolved = provider_id_of(provider)
+                if resolved:
+                    return resolved
+            return ""
+
+        # 老版本只有同步版
+        getter = getattr(self.context, "get_using_provider", None)
+        if callable(getter):
+            for call in (lambda: getter(umo=umo or None), lambda: getter()):
+                try:
+                    provider = call()
+                except (TypeError, ValueError):
+                    continue
+                except Exception:
+                    continue
+                resolved = provider_id_of(provider)
+                if resolved:
+                    return resolved
+        return ""
+
     async def generate(
         self,
         prompt: str,
@@ -87,34 +151,45 @@ class LLMClient:
         system_prompt: str = "",
         image_urls: list[str] | None = None,
         provider_id: str = "",
+        umo: str = "",
     ) -> LLMResult:
         if not self.available:
             return LLMResult(text="", error="llm_generate 不可用")
 
-        kwargs: dict[str, Any] = {"prompt": prompt}
+        # chat_provider_id 是必填参数，留空时必须先解析出一个真实 id
+        resolved = provider_id or await self._resolve_provider_id(umo)
+        if not resolved:
+            return LLMResult(
+                text="",
+                error=(
+                    "没有可用的对话模型：请在 AstrBot 里启用一个 chat provider，"
+                    "或在本插件配置里填 analysis_provider_id"
+                ),
+            )
+
+        kwargs: dict[str, Any] = {
+            "chat_provider_id": resolved,
+            "prompt": prompt,
+        }
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
         if image_urls:
-            # AstrBot 的 llm_generate 接受 image_url 列表做多模态
             kwargs["image_urls"] = image_urls
-        if provider_id:
-            kwargs["chat_provider_id"] = provider_id
 
         try:
             response = await self.context.llm_generate(**kwargs)
-        except TypeError:
-            # 老的/不同的签名：退回纯文本，丢掉图片参数
-            try:
-                response = await self.context.llm_generate(prompt=prompt)
-            except Exception as exc:  # pragma: no cover
-                return LLMResult(text="", error=f"{type(exc).__name__}: {exc}")
-        except Exception as exc:  # pragma: no cover
+        except TypeError as exc:
+            return LLMResult(
+                text="",
+                error=f"llm_generate 签名不匹配: {type(exc).__name__}: {exc}",
+            )
+        except Exception as exc:  # pragma: no cover - 网络/额度等
             return LLMResult(text="", error=f"{type(exc).__name__}: {exc}")
 
         text = getattr(response, "completion_text", None)
         if text is None:
             text = str(response or "")
-        return LLMResult(text=str(text), provider_id=provider_id)
+        return LLMResult(text=str(text), provider_id=resolved)
 
     async def generate_json(
         self,
@@ -123,11 +198,13 @@ class LLMClient:
         system_prompt: str = "",
         image_urls: list[str] | None = None,
         provider_id: str = "",
+        umo: str = "",
     ) -> dict[str, Any] | None:
         result = await self.generate(
             prompt,
             system_prompt=system_prompt,
             image_urls=image_urls,
             provider_id=provider_id,
+            umo=umo,
         )
         return extract_json(result.text)

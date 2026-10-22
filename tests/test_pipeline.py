@@ -48,12 +48,22 @@ class FakeResponse:
 
 
 class FakeContext:
-    """只实现 llm_generate 与 send_message。"""
+    """只实现 llm_generate 与 send_message。
+
+    必须提供 get_using_provider_async：AstrBot 的 llm_generate 要求
+    chat_provider_id 必填，LLMClient 在配置留空时会来解析默认模型；
+    解析不到就不会发起调用（见 tests/test_llm.py）。
+    """
 
     def __init__(self, replies: list[str]) -> None:
         self.replies = list(replies)
         self.sent: list[tuple[str, list]] = []
         self.prompts: list[str] = []
+
+    async def get_using_provider_async(self, umo=None, *, locale="zh-CN"):
+        return type(
+            "P", (), {"provider_config": {"id": "fake-provider"}}
+        )()
 
     async def llm_generate(self, **kwargs):
         self.prompts.append(kwargs.get("prompt", ""))

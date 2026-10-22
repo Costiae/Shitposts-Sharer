@@ -193,6 +193,7 @@ class Analyzer:
             system_prompt=SYSTEM,
             image_urls=image_urls,
             provider_id=str(self.settings.get("analysis_provider_id") or ""),
+            umo=message.group_key,
         )
         if data is None:
             return ShitVerdict(analysis=Analysis(), raw={}, ok=False)
@@ -215,7 +216,9 @@ class Analyzer:
         return "\n".join(lines)
 
     # ------------------------------------------------------------ 上下文关系
-    async def relate(self, messages_text: str) -> dict[str, Any] | None:
+    async def relate(
+        self, messages_text: str, umo: str = ""
+    ) -> dict[str, Any] | None:
         if not messages_text.strip():
             return None
         template = self._prompt("context_prompt", DEFAULT_CONTEXT_PROMPT)
@@ -224,6 +227,7 @@ class Analyzer:
             prompt,
             system_prompt=SYSTEM,
             provider_id=str(self.settings.get("analysis_provider_id") or ""),
+            umo=umo,
         )
 
     # ------------------------------------------------------------ 群契合度
@@ -233,6 +237,7 @@ class Analyzer:
         shit_keywords: list[str],
         groups: list[GroupProfile],
         recent_keywords: dict[str, list[str]] | None = None,
+        umo: str = "",
     ) -> dict[str, float]:
         """一次性给多个候选群打分，省调用次数。"""
         if not groups:
@@ -281,6 +286,7 @@ class Analyzer:
             prompt,
             system_prompt=SYSTEM,
             provider_id=str(self.settings.get("analysis_provider_id") or ""),
+            umo=umo,
         )
         if not data:
             return {}

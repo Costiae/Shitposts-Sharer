@@ -303,6 +303,7 @@ class Pipeline:
                 shit_text=blob[:1500],
                 shit_keywords=keywords,
                 groups=[groups[item.group_key] for item in top if item.group_key in groups],
+                umo=record.source_group,
             )
             if scores:
                 plan = self.router.apply_llm_scores(plan, scores, list(groups.values()))
