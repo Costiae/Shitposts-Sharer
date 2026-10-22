@@ -49,7 +49,7 @@ class TestTargets(unittest.TestCase):
         storage = Storage(db)
         try:
             storage.upsert_group(
-                GroupProfile(group_key=GROUP_A, name="group A", direction=Direction.IN)
+                GroupProfile(group_key=GROUP_A, name="group A", direction=Direction.RECEIVE)
             )
             event = FakeEvent()
             self.assertTrue(resolve(storage, event, "").ok)
@@ -87,19 +87,32 @@ class TestCommands(unittest.TestCase):
 
     def test_register_direction_aliases(self):
         for token, expected in (
-            ("in", Direction.IN),
-            ("out", Direction.OUT),
+            ("receive", Direction.RECEIVE),
+            ("recv", Direction.RECEIVE),
+            ("emit", Direction.EMIT),
             ("both", Direction.BOTH),
+            ("all", Direction.BOTH),
         ):
             self.commands.dispatch(self.event, ["register", token])
             self.assertIs(self.storage.get_group(GROUP_A).direction, expected)
+
+    def test_register_rejects_old_in_out_names(self):
+        """in/out 已废弃：语言统一，不再接受。"""
+        for token in ("in", "out"):
+            result = self.commands.dispatch(self.event, ["register", token])
+            self.assertFalse(result.ok, f"{token} should be rejected")
+            self.assertIn("receive", result.text)
+
+    def test_register_rejects_chinese_aliases(self):
+        result = self.commands.dispatch(self.event, ["register", "收"])
+        self.assertFalse(result.ok)
 
     def test_status_and_list(self):
         self.assertEqual(
             self.commands.dispatch(self.event, ["list"]).text,
             "No group registered yet.",
         )
-        self.commands.dispatch(self.event, ["register", "in"])
+        self.commands.dispatch(self.event, ["register", "receive"])
         status = self.commands.dispatch(self.event, ["status"])
         self.assertIn("confidence", status.text)
 
@@ -113,7 +126,7 @@ class TestCommands(unittest.TestCase):
         self.assertIsNone(self.storage.get_group(GROUP_A))
 
     def test_threshold_percent(self):
-        self.commands.dispatch(self.event, ["register", "in", "80%"])
+        self.commands.dispatch(self.event, ["register", "receive", "80%"])
         self.assertAlmostEqual(self.storage.get_group(GROUP_A).threshold, 0.8, places=3)
 
     def test_bad_threshold_rejected(self):
@@ -130,7 +143,7 @@ class TestCommands(unittest.TestCase):
     # ---------------------------------------------------------------- 跨群
     def _register_b(self, enabled: bool = True) -> None:
         self.commands.dispatch(
-            self.event, ["register", "in", GROUP_B_ID], is_admin=True
+            self.event, ["register", "receive", GROUP_B_ID], is_admin=True
         )
         if not enabled:
             self.commands.dispatch(self.event, ["off", GROUP_B_ID], is_admin=True)
@@ -139,7 +152,7 @@ class TestCommands(unittest.TestCase):
         self._register_b()
         group_b = self.storage.get_group(GROUP_B)
         self.assertIsNotNone(group_b)
-        self.assertIs(group_b.direction, Direction.IN)
+        self.assertIs(group_b.direction, Direction.RECEIVE)
 
     def test_admin_pauses_and_resumes_another_group(self):
         self._register_b()

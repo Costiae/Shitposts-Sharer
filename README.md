@@ -45,9 +45,18 @@ AstrBot 扩展：监听已注册群的全部消息，识别"潜在的屎"（合�
 
 | 字段 | 说明 |
 | --- | --- |
-| 方向 | `in` 只收 / `out` 只发 / `both` 进出 |
+| 方向 | `receive` 只收 / `emit` 只发 / `both` 进出 |
 | 口味 | 关键词向量，由该群**吃过的屎**（判为 `is_shit` 的内容）累积而成 |
 | 可信度 | 由**样本量**、**偏移度**、**采纳率**共同决定 |
+
+> **方向描述的是「这个群」，不是插件。**
+>
+> - `receive` —— 这个群收别处的屎；它自己产的内容不会被搬走
+> - `emit` —— 这个群产屎，被别人搬走；它不接收
+> - `both` —— 既产又收
+>
+> 字段值与 `can_receive` / `can_emit` 同名对齐。旧版本的 `in` / `out` 会在
+> 插件加载时自动迁移为 `receive` / `emit`，已注册的群无需重新登记。
 
 可信度公式（`core/profile.py`）：
 
@@ -99,7 +108,7 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 
 | 指令 | 说明 |
 | --- | --- |
-| `/shit register <in\|out\|both> [target] [threshold]` | 加入搬运网络，默认 `both`，阈值可写 `0.8` 或 `80%` |
+| `/shit register <receive\|emit\|both> [target] [threshold]` | 加入搬运网络，默认 `both`，阈值可写 `0.8` 或 `80%` |
 | `/shit unregister [target]` | 移出网络 |
 | `/shit on <target>` | 开启该群搬运 |
 | `/shit off <target>` | 暂停该群搬运（静默） |
@@ -115,9 +124,12 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 | --- | --- |
 | `/shit debug [target]` | 摊开每一道闸门：插件开关、群是否注册、方向、可信度 vs 阈值、LLM 是否可用、待处理窗口数 |
 | `/shit tags [target]` | 导出群的口味词表（省略则汇总所有群） |
-| `/shit forceout [target]` | **无条件搬出**：忽略方向/口味/可信度/LLM 复核，直接推到目标群 |
-| `/shit forcein [target]` | **无条件搬入**：只更新目标群口味，不往外发 |
+| `/shit relay [target]` | **无条件搬出**：忽略方向/口味/可信度/LLM 复核，直接推到目标群 |
+| `/shit intake [target]` | **无条件搬入**：只更新目标群口味，不往外发 |
 | `/shoot <文本>` | 把一段文本直接丢进判定流水线 |
+
+> `relay` / `intake` 描述的是**这条消息**的去向，与 `receive` / `emit`
+> （描述**群**的角色）是两个不同的维度，所以刻意用了不同的词。
 
 **权限**：操作当前群不需要管理员（群友自助注册）；`<target>` 指向别的群时必须是管理员。
 

@@ -69,15 +69,32 @@ def make_shit(text: str, keywords: list[str], group_key: str = "g-source") -> Sh
 
 class TestDirection(unittest.TestCase):
     def test_parse_and_capabilities(self):
-        self.assertIs(Direction.parse("进出"), Direction.BOTH)
         self.assertIs(Direction.parse("both"), Direction.BOTH)
-        self.assertTrue(Direction.IN.can_receive)
-        self.assertFalse(Direction.IN.can_emit)
-        self.assertTrue(Direction.OUT.can_emit)
-        self.assertFalse(Direction.OUT.can_receive)
+        self.assertIs(Direction.parse("all"), Direction.BOTH)
+        self.assertIs(Direction.parse("recv"), Direction.RECEIVE)
+        self.assertTrue(Direction.RECEIVE.can_receive)
+        self.assertFalse(Direction.RECEIVE.can_emit)
+        self.assertTrue(Direction.EMIT.can_emit)
+        self.assertFalse(Direction.EMIT.can_receive)
         self.assertTrue(Direction.BOTH.can_emit and Direction.BOTH.can_receive)
         with self.assertRaises(ValueError):
-            Direction.parse("乱来")
+            Direction.parse("bogus")
+
+    def test_old_and_chinese_names_are_gone(self):
+        """语言统一：in/out 与中文别名都不再被 parse 接受。"""
+        for token in ("in", "out", "收", "发", "进出"):
+            with self.assertRaises(ValueError, msg=f"{token} should be rejected"):
+                Direction.parse(token)
+
+    def test_values_align_with_capability_names(self):
+        """字段值与 can_receive/can_emit 对齐，避免 in/out 那种主语歧义。"""
+        self.assertEqual(Direction.RECEIVE.value, "receive")
+        self.assertEqual(Direction.EMIT.value, "emit")
+        self.assertEqual(Direction.BOTH.value, "both")
+
+    def test_describe_names_the_group_as_subject(self):
+        for direction in Direction:
+            self.assertIn("this group", direction.describe())
 
 
 class TestVector(unittest.TestCase):
@@ -175,9 +192,9 @@ class TestRouter(unittest.TestCase):
 
     def test_direction_and_threshold(self):
         groups = [
-            make_group("out-only", Direction.OUT),
-            make_group("in-only", Direction.IN, native=50),
-            make_group("too-fresh", Direction.IN, native=0),
+            make_group("out-only", Direction.EMIT),
+            make_group("in-only", Direction.RECEIVE, native=50),
+            make_group("too-fresh", Direction.RECEIVE, native=0),
         ]
         plan = self.router.keyword_plan(self.shit, groups, exclude={"g-source"})
         keys = plan.group_keys()
@@ -192,13 +209,13 @@ class TestRouter(unittest.TestCase):
         settings = make_settings(threshold_overall=0.0)
         router = Router(settings)
         plan = router.keyword_plan(
-            self.shit, [make_group("fresh", Direction.IN, native=0)]
+            self.shit, [make_group("fresh", Direction.RECEIVE, native=0)]
         )
         # 新鲜群也能收（默认阈值 0 只防“口味不像”，不防“样本少”）
         self.assertIn("fresh", plan.group_keys())
 
     def test_no_repeat_delivery(self):
-        groups = [make_group("in-only", Direction.IN)]
+        groups = [make_group("in-only", Direction.RECEIVE)]
         plan = self.router.keyword_plan(self.shit, groups, delivered={"in-only"})
         self.assertEqual(plan.candidates, [])
         self.assertTrue(plan.rejected)

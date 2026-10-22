@@ -169,7 +169,7 @@ class Pipeline:
         if group is not None and not group.enabled:
             return
         if group is not None and not group.direction.can_emit:
-            # 只收不发的群：它自己的内容不往外搬，但消息仍然要进上下文
+            # receive 群：它自己说的话不往外搬，但消息仍进上下文（作为语境）
             message = message_from_event(event, group_key)
             self.accumulator.observe(self._enrich(message))
             return
@@ -310,7 +310,7 @@ class Pipeline:
 
         plan = self.router.keyword_plan(
             record,
-            self.storage.list_groups(Direction.IN),
+            self.storage.list_groups(Direction.RECEIVE),
             exclude={group_key},
         )
 
@@ -318,7 +318,7 @@ class Pipeline:
         if plan.candidates and self.settings.get("llm_rerank", True) and self.llm.available:
             top = plan.candidates[: int(self.settings.get("llm_candidates") or 3)]
             groups = {
-                group.group_key: group for group in self.storage.list_groups(Direction.IN)
+                group.group_key: group for group in self.storage.list_groups(Direction.RECEIVE)
             }
             scores = await self.analyzer.score_groups(
                 shit_text=blob[:1500],
@@ -529,7 +529,7 @@ class Pipeline:
         )
         lines = [
             f"群：{group.name or group.group_key}",
-            f"方向：{group.direction.label()}",
+            f"方向：{group.direction.label()}（{group.direction.describe()}）",
             f"可信度：{confidence:.2f}"
             f"（原生屎 {group.native_message_count} 条 / {group.native_char_count} 字，"
             f"偏移惩罚 {group.rejected_count} 次）",

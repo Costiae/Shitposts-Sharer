@@ -33,7 +33,7 @@ from .targets import (
 HELP_TEXT = """Shitposts Sharer commands
   <target> = group id, full UMO, #index, or name. Omit = current session.
 
-  /shit register <in|out|both> [target] [threshold]   join the network
+  /shit register <receive|emit|both> [target] [threshold]   join the network
   /shit unregister [target]                           leave the network
   /shit on <target>                                   enable relay for a group
   /shit off <target>                                  pause relay for a group
@@ -46,11 +46,14 @@ HELP_TEXT = """Shitposts Sharer commands
 Debug (admin):
   /shit debug [target]                                show every gate and why it failed
   /shit tags [target]                                 dump taste terms (all groups if omitted)
-  /shit forceout [target]                             ignore direction/taste/confidence, relay now
-  /shit forcein [target]                              force this message into the intake path
+  /shit relay [target]                                bypass direction/taste/confidence, relay now
+  /shit intake [target]                               force this message into the taste update
   /shoot <text>                                       admin: test one payload
 
-Direction: in = receive only, out = emit only, both = receive and emit.
+Direction describes THE GROUP, not the plugin:
+  receive   this group receives shit from other groups; it is never a source
+  emit      this group produces shit that gets relayed out; it receives nothing
+  both      this group both produces and receives
 Handling a group other than the current one requires admin."""
 
 
@@ -122,10 +125,10 @@ class Commands:
             return self.debug(event, rest, is_admin=is_admin)
         if action in ("tags", "tag"):
             return self.tags(event, rest, is_admin=is_admin)
-        if action in ("forceout", "force_out", "chout"):
+        if action in ("relay", "forceout", "push"):
             # 当作源屎，忽略方向/口味/可信度，直接推出去
             return self.force_delivery(event, rest, is_admin=is_admin, incoming=True)
-        if action in ("forcein", "force_in", "chin"):
+        if action in ("intake", "forcein", "absorb"):
             # 当作被搬入的屎，只更新目标群口味，不外发
             return self.force_delivery(event, rest, is_admin=is_admin, incoming=False)
 
@@ -326,7 +329,7 @@ class Commands:
 
         for token in args:
             lowered = token.lower()
-            if lowered in ("in", "out", "both"):
+            if lowered in ("receive", "recv", "emit", "both", "all"):
                 direction_token = lowered
                 continue
             if _is_threshold(token):
@@ -343,7 +346,7 @@ class Commands:
         try:
             direction = Direction.parse(direction_token)
         except ValueError as exc:
-            return CommandResult(f"{exc} - use in / out / both", ok=False)
+            return CommandResult(f"{exc} - use receive / emit / both", ok=False)
 
         threshold = 0.0
         if threshold_token:

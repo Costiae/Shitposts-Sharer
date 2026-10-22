@@ -65,10 +65,10 @@ class TestDebugCommands(unittest.TestCase):
             probe_force=self.pipeline,
         )
         self.storage.upsert_group(
-            GroupProfile(group_key=GROUP_A, name="A", direction=Direction.OUT)
+            GroupProfile(group_key=GROUP_A, name="A", direction=Direction.EMIT)
         )
         self.storage.upsert_group(
-            GroupProfile(group_key=GROUP_B, name="B", direction=Direction.IN)
+            GroupProfile(group_key=GROUP_B, name="B", direction=Direction.RECEIVE)
         )
         self.event = FakeEvent(GROUP_A, "A")
 
@@ -131,7 +131,7 @@ class TestDebugCommands(unittest.TestCase):
 
     def test_forceout_delivers_ignoring_direction(self):
         self._register_all_groups()
-        result = self.commands.dispatch(self.event, ["forceout"], is_admin=True)
+        result = self.commands.dispatch(self.event, ["relay"], is_admin=True)
         self.assertTrue(result.ok, result.text)
         self.assertIn(GROUP_B, result.text)
         sent_groups = [key for key, _ in self.context.sent]
@@ -140,7 +140,7 @@ class TestDebugCommands(unittest.TestCase):
     def test_forceout_with_target(self):
         self._register_all_groups()
         result = self.commands.dispatch(
-            self.event, ["forceout", "200002"], is_admin=True
+            self.event, ["relay", "200002"], is_admin=True
         )
         self.assertTrue(result.ok, result.text)
         self.assertEqual([key for key, _ in self.context.sent], [GROUP_B])
@@ -148,7 +148,7 @@ class TestDebugCommands(unittest.TestCase):
     def test_forcein_updates_intake_without_sending(self):
         self._register_all_groups()
         result = self.commands.dispatch(
-            self.event, ["forcein", "200002"], is_admin=True
+            self.event, ["intake", "200002"], is_admin=True
         )
         self.assertTrue(result.ok, result.text)
         self.assertEqual(self.context.sent, [])
@@ -156,15 +156,25 @@ class TestDebugCommands(unittest.TestCase):
         self.assertTrue(self.storage.get_group(GROUP_B).intake)
 
     def test_force_is_admin_only(self):
-        denied = self.commands.dispatch(self.event, ["forceout"])
+        denied = self.commands.dispatch(self.event, ["relay"])
         self.assertFalse(denied.ok)
         self.assertEqual(self.context.sent, [])
 
     # ---------------------------------------------------------------- help
     def test_help_mentions_debug_commands(self):
-        for token in ("debug", "tags", "forceout", "forcein"):
+        for token in ("debug", "tags", "relay", "intake"):
             self.assertIn(token, HELP_TEXT)
         HELP_TEXT.encode("ascii")
+
+    def test_help_states_direction_subject_is_the_group(self):
+        """帮助里必须写清主语：direction 描述的是群，不是插件。"""
+        self.assertIn("THE GROUP, not the plugin", HELP_TEXT)
+        self.assertIn("receive", HELP_TEXT)
+        self.assertIn("emit", HELP_TEXT)
+
+    def test_help_rejects_no_stale_in_out_wording(self):
+        stale = "in = receive only, out = emit only"
+        self.assertNotIn(stale, HELP_TEXT)
 
 
 if __name__ == "__main__":

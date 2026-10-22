@@ -105,13 +105,13 @@ class TestPipeline(unittest.TestCase):
         from core.models import GroupProfile
 
         self.storage.upsert_group(
-            GroupProfile(group_key="src", name="出屎群", direction=Direction.OUT)
+            GroupProfile(group_key="src", name="出屎群", direction=Direction.EMIT)
         )
         self.storage.upsert_group(
             GroupProfile(
                 group_key="sink",
                 name="吃屎甲",
-                direction=Direction.IN,
+                direction=Direction.RECEIVE,
                 intake=build_vector(["抽象", "离谱"], "抽象离谱的玩梗内容", 0.9),
                 native_message_count=40,
                 native_char_count=2000,
@@ -121,7 +121,7 @@ class TestPipeline(unittest.TestCase):
             GroupProfile(
                 group_key="other",
                 name="正经群",
-                direction=Direction.IN,
+                direction=Direction.RECEIVE,
                 intake=build_vector(["考研", "论文"], "考研论文进度", 0.2),
                 native_message_count=40,
                 native_char_count=2000,

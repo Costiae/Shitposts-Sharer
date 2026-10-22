@@ -1,7 +1,7 @@
 """搬运路由：决定一条屎去哪几个群。
 
 规则（来自需求）：
-1. 只有“只发 / 进出”的群能出屎；只有“只收 / 进出”的群能收屎；
+1. 只有 emit / both 的群能当屎源；只有 receive / both 的群能收屎；
 2. 可信度不够的群不搬 —— 但惩罚很温和，过了门槛就行；
 3. 匹配分过阈值就搬，多个群都过就都搬；
 4. 同一条屎对同一个群只搬一次（含“别人已经先搬过了”的情况）。
@@ -138,8 +138,5 @@ def fingerprint_of(shit: ShitRecord) -> str:
 
 
 def direction_matrix() -> dict[Direction, str]:
-    return {
-        Direction.IN: "能收别人的屎，但不往外发",
-        Direction.OUT: "自己产屎往外发，不收别人的",
-        Direction.BOTH: "既产又收",
-    }
+    """方向说明。主语永远是「这个群」。"""
+    return {direction: direction.describe() for direction in Direction}

@@ -16,45 +16,62 @@ from typing import Any
 
 
 class Direction(StrEnum):
-    """群在搬运拓扑中的角色。"""
+    """**群**在搬运拓扑中的角色（不是插件的视角）。
 
-    IN = "in"  # 只收
-    OUT = "out"  # 只发
-    BOTH = "both"  # 进出
+    RECEIVE  这个群收别人搬来的屎
+    EMIT     这个群产屎，被别人搬走
+    BOTH     两者都是
+
+    字段值与 ``can_receive`` / ``can_emit`` 对齐，避免 in/out 那样的主语歧义。
+    旧的 ``in`` / ``out`` 值由 storage 的迁移在加载时自动转换。
+    """
+
+    RECEIVE = "receive"
+    EMIT = "emit"
+    BOTH = "both"
 
     @property
     def can_receive(self) -> bool:
-        return self in (Direction.IN, Direction.BOTH)
+        return self in (Direction.RECEIVE, Direction.BOTH)
 
     @property
     def can_emit(self) -> bool:
-        return self in (Direction.OUT, Direction.BOTH)
+        return self in (Direction.EMIT, Direction.BOTH)
 
     @classmethod
     def parse(cls, raw: str) -> "Direction":
         value = (raw or "").strip().lower()
-        # 中文别名：群友手滑也认
+        # 只认英文；语言统一，不再保留中文别名
         alias = {
-            "收": cls.IN,
-            "入": cls.IN,
-            "进": cls.IN,
-            "只收": cls.IN,
-            "出": cls.OUT,
-            "发": cls.OUT,
-            "只发": cls.OUT,
-            "进出": cls.BOTH,
-            "收发": cls.BOTH,
-            "都": cls.BOTH,
+            "receive": cls.RECEIVE,
+            "recv": cls.RECEIVE,
+            "emit": cls.EMIT,
+            "both": cls.BOTH,
+            "all": cls.BOTH,
         }
         if value in alias:
             return alias[value]
         for member in cls:
             if member.value == value:
                 return member
-        raise ValueError(f"未知的搬运方向: {raw!r}（可用 in / out / both）")
+        raise ValueError(
+            f"unknown direction: {raw!r} (use receive / emit / both)"
+        )
 
     def label(self) -> str:
-        return {self.IN: "只收", self.OUT: "只发", self.BOTH: "进出"}[self]
+        return {
+            self.RECEIVE: "receive",
+            self.EMIT: "emit",
+            self.BOTH: "both",
+        }[self]
+
+    def describe(self) -> str:
+        """给人看的一句话说明，主语永远是「这个群」。"""
+        return {
+            self.RECEIVE: "this group receives shit from others; it is never used as a source",
+            self.EMIT: "this group produces shit that gets relayed out; it receives nothing",
+            self.BOTH: "this group both produces shit and receives shit from others",
+        }[self]
 
 
 class Kind(StrEnum):

@@ -114,6 +114,23 @@ class Storage:
         row = self.read_setting("schema_version", "")
         if row == "":
             self.write_setting("schema_version", str(SCHEMA_VERSION))
+        self._migrate_direction_values()
+
+    def _migrate_direction_values(self) -> None:
+        """in/out -> receive/emit。
+
+        旧版本把群的角色叫 in / out，主语有歧义（到底是谁 in？）。
+        现在字段值改成 receive / emit，与 can_receive / can_emit 对齐。
+        已注册的群必须无感升级，否则它们的角色会读不出来。
+        """
+        mapping = {"in": "receive", "out": "emit"}
+        for old, new in mapping.items():
+            updated = self._conn.execute(
+                "UPDATE groups SET direction = ? WHERE direction = ?", (new, old)
+            ).rowcount
+            if updated:
+                self._write(lambda: None)  # 触发 commit
+        self._conn.commit()
 
     # ------------------------------------------------------------------ 设置
     def read_setting(self, key: str, default: str = "") -> str:
@@ -159,11 +176,10 @@ class Storage:
         sql = "SELECT * FROM groups"
         params: tuple[Any, ...] = ()
         if direction is not None:
-            # both 同时满足 in 与 out 查询
-            if direction is Direction.IN:
-                sql += " WHERE direction IN ('in', 'both')"
-            elif direction is Direction.OUT:
-                sql += " WHERE direction IN ('out', 'both')"
+            # both 同时满足 receive 与 emit 的查询
+            if direction in (Direction.RECEIVE, Direction.EMIT):
+                sql += " WHERE direction IN (?, 'both')"
+                params = (direction.value,)
             else:
                 sql += " WHERE direction = ?"
                 params = (direction.value,)
