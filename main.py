@@ -76,13 +76,30 @@ class ShitpostsSharer(Star):
             logger.error(f"搬屎监听出错：{type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------------ 指令
+    #
+    # SIGNATURE RULE: command handlers take (self, event) and nothing else.
+    #
+    # AstrBot's CommandFilter.init_handler_md() records every parameter after
+    # `self` and `event`, then validate_and_convert_params() CALLS that value
+    # as a converter:
+    #
+    #     result[param_name] = param_type_or_default_val(params[i])
+    #
+    # A trailing *args is recorded as inspect.Parameter.empty, so it becomes
+    # `_empty("help")` -> TypeError: _empty() takes no arguments. The caller
+    # only catches ValueError, so the TypeError reaches waking_check, which
+    # posts an error into the group and calls stop_event() - the command is
+    # silently swallowed and never runs.
+    #
+    # Any per-command arguments are therefore parsed out of event.message_str
+    # by hand. Never add *args, **kwargs or a typed positional parameter here.
     @filter.command(COMMAND, alias=ALIASES)
-    async def shit(self, event: AstrMessageEvent, *args):
+    async def shit(self, event: AstrMessageEvent):
         """/shit <subcommand>: register, status, threshold, ...
 
-        NOTE: this handler must never let its own exceptions escape. AstrBot
-        turns an uncaught exception into an error traceback posted straight
-        into the group, which is exactly how a plugin looks broken.
+        NOTE: this handler must never let its own exceptions escape either.
+        AstrBot turns an uncaught exception into an error traceback posted
+        straight into the group, which is exactly how a plugin looks broken.
         """
         parts = _command_args(event, {COMMAND, *ALIASES})
 
@@ -98,8 +115,11 @@ class ShitpostsSharer(Star):
         yield event.plain_result(text or "(empty)")
 
     @filter.command("shoot", alias={"manual"})
-    async def manual_shot(self, event: AstrMessageEvent, *args):
-        """/shoot <text>: admin-only, push a text straight into the pipeline."""
+    async def manual_shot(self, event: AstrMessageEvent):
+        """/shoot <text>: admin-only, push a text straight into the pipeline.
+
+        No *args - see the signature rule above.
+        """
         if not _is_admin(event):
             yield event.plain_result("Admin only.")
             return
@@ -147,9 +167,12 @@ def _strip_slash(token: str) -> str:
 def _command_args(event: AstrMessageEvent, names: set[str]) -> list[str]:
     """从原始消息里取出指令后的参数。
 
-    不用装饰器注入的 args：AstrBot 会把 handler 签名里 ``*args`` 之后的参数
-    当作 parsed params 传进来，而有 ``*args`` 时它只能给空。直接切 message_str
-    更稳，也能顺带支持别名。
+    不使用装饰器注入的参数，原因见 ``shit`` 上方的 SIGNATURE RULE：
+    任何额外的形参（包括 ``*args``）都会被 AstrBot 的参数解析器当作
+    转换器调用，``*args`` 对应 ``inspect.Parameter.empty``，直接抛
+    ``TypeError: _empty() takes no arguments``，异常一路上抛让指令被
+    ``stop_event()`` 吞掉。所以参数一律从 ``message_str`` 自己切，
+    顺带也支持别名。
     """
     text = (getattr(event, "message_str", "") or "").strip()
     parts = text.split()

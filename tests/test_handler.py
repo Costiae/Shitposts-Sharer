@@ -112,6 +112,68 @@ plugin_main = _load_plugin_module()
 from tests.test_command_helpers import FakeEvent  # noqa: E402
 
 
+class TestHandlerSignature(unittest.TestCase):
+    """Enforce AstrBot's parameter-parsing contract.
+
+    AstrBot records every handler parameter after (self, event) and calls it
+    as a converter. A trailing *args becomes inspect.Parameter.empty, which
+    raises TypeError: _empty() takes no arguments - the command is swallowed
+    by waking_check and never runs. Converting this class goes through exactly
+    the code path that failed in production, so keep it.
+    """
+
+    # The exact coercion AstrBot's validate_and_convert_params performs:
+    #     result[param_name] = param_type_or_default_val(params[i])
+    @staticmethod
+    def _astrbot_convert(params: dict, argv: list[str]) -> dict:
+        result = {}
+        for index, (name, type_or_default) in enumerate(params.items()):
+            result[name] = type_or_default(argv[index])
+        return result
+
+    def _extra_params(self, func) -> dict:
+        import inspect as _inspect
+
+        params = {}
+        for index, (name, param) in enumerate(
+            _inspect.signature(func).parameters.items()
+        ):
+            if index < 2:  # self, event
+                continue
+            if param.default is _inspect.Parameter.empty:
+                params[name] = param.annotation
+            else:
+                params[name] = param.default
+        return params
+
+    def test_command_handlers_declare_no_extra_params(self):
+        plugin = plugin_main.ShitpostsSharer.__new__(plugin_main.ShitpostsSharer)
+        for name in ("shit", "manual_shot"):
+            handler = getattr(plugin_main.ShitpostsSharer, name)
+            self.assertEqual(
+                self._extra_params(handler),
+                {},
+                f"{name} declares parameters AstrBot would try to coerce",
+            )
+
+    def test_reproduces_astrbot_failure_with_star_args(self):
+        import inspect as _inspect
+
+        async def legacy(self, event, *args):
+            yield None
+
+        params = {}
+        for index, (name, param) in enumerate(_inspect.signature(legacy).parameters.items()):
+            if index < 2:
+                continue
+            params[name] = param.annotation if param.default is _inspect.Parameter.empty else param.default
+
+        self.assertEqual(params, {"args": _inspect.Parameter.empty})
+        with self.assertRaises(TypeError) as ctx:
+            self._astrbot_convert(params, ["help"])
+        self.assertIn("_empty() takes no arguments", str(ctx.exception))
+
+
 class TestCommandHandler(unittest.TestCase):
     def setUp(self):
         self.plugin = plugin_main.ShitpostsSharer.__new__(
