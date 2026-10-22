@@ -182,6 +182,46 @@ class TestCommands(unittest.TestCase):
         self.assertTrue(result.ok, result.text)
         self.assertFalse(self.storage.get_group(GROUP_A).enabled)
 
+    def test_image_switch_is_per_group(self):
+        self.commands.dispatch(self.event, ["register", "both"])
+
+        status = self.commands.dispatch(self.event, ["image"])
+        self.assertTrue(status.ok, status.text)
+        self.assertIn("image relay: on", status.text)
+
+        off = self.commands.dispatch(self.event, ["image", "off"])
+        self.assertTrue(off.ok, off.text)
+        self.assertFalse(self.storage.get_group(GROUP_A).image_enabled)
+
+        status = self.commands.dispatch(self.event, ["status"])
+        self.assertIn("image     : off", status.text)
+
+        on = self.commands.dispatch(self.event, ["image", "on"])
+        self.assertTrue(on.ok, on.text)
+        self.assertTrue(self.storage.get_group(GROUP_A).image_enabled)
+
+    def test_image_switch_for_another_group_requires_admin(self):
+        self._register_b()
+        denied = self.commands.dispatch(
+            self.event, ["image", "off", GROUP_B_ID], is_admin=False
+        )
+        self.assertFalse(denied.ok)
+        self.assertTrue(self.storage.get_group(GROUP_B).image_enabled)
+
+        allowed = self.commands.dispatch(
+            self.event, ["image", "off", GROUP_B_ID], is_admin=True
+        )
+        self.assertTrue(allowed.ok, allowed.text)
+        self.assertFalse(self.storage.get_group(GROUP_B).image_enabled)
+
+    def test_non_admin_can_toggle_own_image_switch(self):
+        self.commands.dispatch(self.event, ["register", "both"])
+        result = self.commands.dispatch(
+            self.event, ["image", "off"], is_admin=False
+        )
+        self.assertTrue(result.ok, result.text)
+        self.assertFalse(self.storage.get_group(GROUP_A).image_enabled)
+
     def test_target_by_full_umo_and_index(self):
         self._register_b()
         by_umo = self.commands.dispatch(

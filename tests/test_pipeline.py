@@ -248,6 +248,32 @@ class TestPipeline(unittest.TestCase):
         self.assertTrue(record.nsfw)
         self.assertGreater(max(record.image_vector.values()), 0.0)
 
+    def test_image_disabled_source_group_is_skipped_before_judge(self):
+        self._setup_groups()
+        source = self.storage.get_group("src")
+        source.image_enabled = False
+        self.storage.upsert_group(source)
+
+        context = FakeContext([])
+        pipeline = Pipeline(
+            context=context,
+            settings=self.settings,
+            storage=self.storage,
+            logger=QuietLogger(),
+        )
+        message = Message(
+            group_key="src",
+            segments=[Segment(kind="image", url="http://x/ignored.png")],
+        )
+        result = asyncio.run(
+            pipeline.handle_suspicion(pipeline.accumulator.open(message, "媒体"))
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(context.prompts, [])
+        self.assertEqual(pipeline.stats.judged, 0)
+        self.assertEqual(context.sent, [])
+
     def test_minor_sexual_content_is_hard_blocked(self):
         self._setup_groups()
         self.settings.raw["llm_rerank"] = False

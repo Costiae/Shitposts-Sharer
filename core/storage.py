@@ -18,7 +18,7 @@ from typing import Any, Iterable
 
 from .models import Direction, GroupProfile, ShitRecord
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS groups (
@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS groups (
     intake_json          TEXT NOT NULL DEFAULT '{}',
     threshold            REAL NOT NULL DEFAULT 0,
     enabled              INTEGER NOT NULL DEFAULT 1,
+    image_enabled        INTEGER NOT NULL DEFAULT 1,
     drift                REAL NOT NULL DEFAULT 0,
     native_message_count INTEGER NOT NULL DEFAULT 0,
     native_char_count    INTEGER NOT NULL DEFAULT 0,
@@ -140,8 +141,14 @@ class Storage:
             self._conn.commit()
 
     def _migrate_group_columns(self) -> None:
-        """groups.drift：口味偏移度的平滑值。"""
-        self._ensure_columns("groups", {"drift": "REAL NOT NULL DEFAULT 0"})
+        """老库补 groups 列：口味偏移度与图片开关。"""
+        self._ensure_columns(
+            "groups",
+            {
+                "drift": "REAL NOT NULL DEFAULT 0",
+                "image_enabled": "INTEGER NOT NULL DEFAULT 1",
+            },
+        )
 
     def _migrate_shit_columns(self) -> None:
         """shits 的图片标签列（老库默认空，图片按原关键词逻辑匹配）。"""
@@ -195,6 +202,7 @@ class Storage:
             intake=json.loads(row["intake_json"] or "{}"),
             threshold=float(row["threshold"]),
             enabled=bool(row["enabled"]),
+            image_enabled=bool(row["image_enabled"]),
             drift=float(row["drift"]),
             native_message_count=int(row["native_message_count"]),
             native_char_count=int(row["native_char_count"]),
@@ -233,15 +241,17 @@ class Storage:
             """
             INSERT INTO groups (
                 group_key, name, direction, intake_json, threshold, enabled,
-                drift, native_message_count, native_char_count, accepted_count,
-                rejected_count, last_shit_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                image_enabled, drift, native_message_count, native_char_count,
+                accepted_count, rejected_count, last_shit_at, created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(group_key) DO UPDATE SET
                 name = excluded.name,
                 direction = excluded.direction,
                 intake_json = excluded.intake_json,
                 threshold = excluded.threshold,
                 enabled = excluded.enabled,
+                image_enabled = excluded.image_enabled,
                 drift = excluded.drift,
                 native_message_count = excluded.native_message_count,
                 native_char_count = excluded.native_char_count,
@@ -257,6 +267,7 @@ class Storage:
                 json.dumps(profile.intake, ensure_ascii=False),
                 profile.threshold,
                 int(profile.enabled),
+                int(profile.image_enabled),
                 profile.drift,
                 profile.native_message_count,
                 profile.native_char_count,

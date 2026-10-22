@@ -335,8 +335,18 @@ class Pipeline:
             trace.skip("not registered at judge time")
             return None
 
-        self.stats.judged += 1
         message = suspicion.message
+        # 图片开关对源群同样生效：关掉后这个群产出的图不再进入判定。
+        # 文本消息不受影响。
+        if (
+            group is not None
+            and not group.image_enabled
+            and message.kind_hint() == "image"
+        ):
+            trace.skip("image relay disabled for this group")
+            return None
+
+        self.stats.judged += 1
         text = self._enrich(message).text()
         trace.step(f"window closed after {suspicion.age():.1f}s, "
                    f"context={len(suspicion.context_before)} msgs, "

@@ -512,6 +512,21 @@ class TestImageGate(unittest.TestCase):
         self.assertNotIn("text-only", plan.group_keys())
         self.assertIn("图片标签", dict(plan.rejected)["text-only"])
 
+    def test_group_can_disable_image_relay(self):
+        shit = make_image_shit()
+        group = self._group("no-image", ["初音未来", "白丝"])
+        group.image_enabled = False
+        plan = self.router.keyword_plan(shit, [group], exclude={"g-source"})
+        self.assertEqual(plan.candidates, [])
+        self.assertIn("未启用图片", dict(plan.rejected)["no-image"])
+
+    def test_text_relay_is_not_affected_by_image_switch(self):
+        group = self._group("no-image", ["抽象", "离谱"])
+        group.image_enabled = False
+        shit = make_shit("抽象离谱的玩梗内容", ["抽象", "离谱"])
+        plan = self.router.keyword_plan(shit, [group], exclude={"g-source"})
+        self.assertIn("no-image", plan.group_keys())
+
     def test_different_images_have_different_fingerprints(self):
         first = make_image_shit("http://x/a.png")
         second = make_image_shit("http://x/b.png")
@@ -570,6 +585,12 @@ class TestStorage(unittest.TestCase):
         group.drift = 0.42
         self.storage.upsert_group(group)
         self.assertAlmostEqual(self.storage.get_group("g-drift").drift, 0.42)
+
+    def test_image_switch_is_persisted(self):
+        group = make_group("g-image-off")
+        group.image_enabled = False
+        self.storage.upsert_group(group)
+        self.assertFalse(self.storage.get_group("g-image-off").image_enabled)
 
     def test_image_fields_are_persisted(self):
         image = make_image_shit()

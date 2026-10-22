@@ -37,6 +37,7 @@ HELP_TEXT = """Shitposts Sharer commands
   /shit unregister [target]                           leave the network
   /shit on <target>                                   enable relay for a group
   /shit off <target>                                  pause relay for a group
+  /shit image [on|off] [target]                       per-group image relay switch
   /shit status [target]                               taste + confidence
   /shit list                                          all groups
   /shit threshold <0-1|xx%> [target]                  set delivery threshold
@@ -109,6 +110,8 @@ class Commands:
             return self.toggle(event, rest, enabled=True, is_admin=is_admin)
         if action in ("off", "disable", "pause", "stop"):
             return self.toggle(event, rest, enabled=False, is_admin=is_admin)
+        if action in ("image", "img", "pic", "picture"):
+            return self.toggle_image(event, rest, is_admin=is_admin)
         if action in ("status", "info", "show"):
             return self.status(event, rest)
         if action in ("list", "ls", "groups"):
@@ -180,6 +183,10 @@ class Commands:
         lines.append(
             f"  keyword_threshold={self.settings.keyword_threshold:.2f} "
             f"tolerance={self.settings.keyword_tolerance:.2f}"
+        )
+        lines.append(
+            f"  image relay: {'on' if group.image_enabled else 'off'} "
+            f"(per-group switch)"
         )
         lines.append(f"  native={group.native_message_count} chars={group.native_char_count}")
         lines.append(
@@ -397,6 +404,7 @@ class Commands:
         return CommandResult(
             f"[ok] registered {describe_group(group)}\n"
             f"direction : {group.direction.value}\n"
+            f"image     : {'on' if group.image_enabled else 'off'}\n"
             f"confidence: {self._confidence(group):.2f} "
             f"(threshold {self.settings.threshold_for(group.threshold):.2f})\n"
             f"taste     : {describe_intake(group)}\n"
@@ -437,6 +445,66 @@ class Commands:
         verb = "enabled (relay on)" if enabled else "paused (silent)"
         return CommandResult(f"[ok] {verb}: {describe_group(stored)}")
 
+    def toggle_image(
+        self, event: Any, args: list[str], *, is_admin: bool = False
+    ) -> CommandResult:
+        """`/shit image [on|off] [target]` —— 单群图片搬运开关。
+
+        不带 on/off 时只显示当前状态；操作别的群需要管理员。
+        关闭后该群既不产图片屎，也不收图片屎，文本不受影响。
+        """
+        on_words = {"on", "enable", "enabled", "true", "1"}
+        off_words = {"off", "disable", "disabled", "false", "0"}
+
+        state_token = ""
+        target_token = ""
+        if args:
+            first = args[0].strip().lower()
+            if first in on_words | off_words:
+                state_token = first
+                target_token = args[1] if len(args) > 1 else ""
+                if len(args) > 2:
+                    return CommandResult(
+                        "Usage: /shit image [on|off] [target]", ok=False
+                    )
+            else:
+                target_token = args[0]
+                if len(args) > 1:
+                    state_token = args[1].strip().lower()
+                    if state_token not in on_words | off_words:
+                        return CommandResult(
+                            "Usage: /shit image [on|off] [target]", ok=False
+                        )
+                if len(args) > 2:
+                    return CommandResult(
+                        "Usage: /shit image [on|off] [target]", ok=False
+                    )
+
+        group, error = self._target(
+            event,
+            target_token,
+            is_admin=is_admin,
+            require_admin_off_session=bool(state_token),
+        )
+        if error:
+            return error
+        assert group is not None
+        stored = self.storage.get_group(group.group_key)
+        if stored is None:
+            return self._missing(group, target_token)
+
+        if not state_token:
+            state = "on" if stored.image_enabled else "off"
+            return CommandResult(
+                f"image relay: {state} for {describe_group(stored)}\n"
+                f"Use /shit image on|off [target] to change it."
+            )
+
+        stored.image_enabled = state_token in on_words
+        self.storage.upsert_group(stored)
+        state = "enabled" if stored.image_enabled else "disabled"
+        return CommandResult(f"[ok] image relay {state}: {describe_group(stored)}")
+
     def purge(
         self, event: Any, args: list[str], *, is_admin: bool = False
     ) -> CommandResult:
@@ -472,6 +540,7 @@ class Commands:
         return CommandResult(
             f"group     : {describe_group(group)}\n"
             f"direction : {group.direction.value} ({state})\n"
+            f"image     : {'on' if group.image_enabled else 'off'}\n"
             f"confidence: {confidence:.2f} (threshold {threshold:.2f}) -> {verdict}\n"
             f"native    : {group.native_message_count} shit(s), "
             f"{group.native_char_count} chars\n"
@@ -487,6 +556,8 @@ class Commands:
         lines = [f"{len(groups)} group(s):"]
         for index, group in enumerate(groups, start=1):
             state = "" if group.enabled else " [paused]"
+            if not group.image_enabled:
+                state += " [image off]"
             lines.append(
                 f"#{index} {group.direction.value:<4} "
                 f"conf {self._confidence(group):.2f} "

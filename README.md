@@ -102,6 +102,9 @@ AstrBot 扩展：监听已注册群的全部消息，识别"潜在的屎"（合�
   才允许搬给该群；**文字话题对上了也不能代替图片匹配**
 - 群的口味同样会从图片标签里学习：某个群吃过的图，会让它以后更容易收到同角色/IP 的图
 - 成人向图片会在标签里带上 `NSFW`，方便按群口味区分
+- **每个群有独立的图片开关**（默认开）：`/shit image on|off [target]`。
+  关闭后这个群既不产图片屎，也不收图片屎，文本搬运完全不受影响；
+  `/shit status` 和 `/shit list` 会显示图片开关状态
 - **安全硬拦截**：涉及未成年人的性化内容永不搬运、不入库、不参与口味学习，
   没有配置开关
 
@@ -139,6 +142,7 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 | `/shit unregister [target]` | 移出网络 |
 | `/shit on <target>` | 开启该群搬运 |
 | `/shit off <target>` | 暂停该群搬运（静默） |
+| `/shit image [on\|off] [target]` | 单群图片搬运开关；省略 on/off 时查看状态 |
 | `/shit status [target]` | 口味、可信度、是否够格收屎 |
 | `/shit list` | 所有群一览（带 `#序号`） |
 | `/shit threshold <0-1\|xx%> [target]` | 设单群阈值 |

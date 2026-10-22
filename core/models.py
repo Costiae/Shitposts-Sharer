@@ -196,6 +196,9 @@ class GroupProfile:
     intake: dict[str, float] = field(default_factory=dict)
     threshold: float = 0.0  # 单群覆盖阈值，0 表示用全局
     enabled: bool = True
+    # 每个群的图片搬运开关：关闭后这个群既不产图片屎，也不收图片屎。
+    # 文本搬运不受影响。
+    image_enabled: bool = True
     # 口味偏移度的平滑值（0~1）：越大说明这个群最近的口味跳得越厉害。
     # 由 profile.update_intake 维护，参与可信度的“稳定度”因子。
     drift: float = 0.0

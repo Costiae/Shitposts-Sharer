@@ -12,7 +12,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .config import Settings
-from .models import Direction, GroupProfile, RouteCandidate, ShitRecord, normalize_text
+from .models import (
+    Direction,
+    GroupProfile,
+    Kind,
+    RouteCandidate,
+    ShitRecord,
+    normalize_text,
+)
 from .similarity import KeywordMatcher
 
 
@@ -55,6 +62,12 @@ class Router:
         for group in self.eligible_groups(groups, exclude):
             if group.group_key in delivered:
                 plan.rejected.append((group.group_key, "已经搬过"))
+                continue
+
+            # 每个群可以单独关掉图片搬运：即使标签匹配也不发图。
+            # 只拦图片，文本屎仍按原逻辑走。
+            if shit.kind == Kind.IMAGE and not group.image_enabled:
+                plan.rejected.append((group.group_key, "该群未启用图片搬运"))
                 continue
 
             candidate = self.matcher.score(shit, group)

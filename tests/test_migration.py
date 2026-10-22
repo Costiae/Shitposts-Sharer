@@ -173,7 +173,9 @@ class TestDriftColumnMigration(unittest.TestCase):
             group = storage.get_group("legacy")
             self.assertIsNotNone(group)
             self.assertEqual(group.drift, 0.0)
-            self.assertEqual(storage.read_setting("schema_version"), "3")
+            # 老群默认保持图片搬运开启，行为不变
+            self.assertTrue(group.image_enabled)
+            self.assertEqual(storage.read_setting("schema_version"), "4")
         finally:
             storage.close()
 
