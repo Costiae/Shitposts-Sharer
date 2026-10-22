@@ -60,6 +60,23 @@ class Router:
             candidate = self.matcher.score(shit, group)
             threshold = self.settings.threshold_for(group.threshold)
 
+            # 图片专属门：文字话题对上了不代表图对胃口。图片必须靠视觉
+            # 标签（角色/IP/属性）单独过门槛，达不到就不搬。
+            if shit.image_vector:
+                image_score, image_reason = self.matcher.image_match(shit, group)
+                if image_score <= 0:
+                    plan.rejected.append(
+                        (
+                            group.group_key,
+                            f"{image_reason}（图片匹配 {image_score:.2f} < "
+                            f"{self.settings.image_match_threshold:.2f}）",
+                        )
+                    )
+                    continue
+                candidate.image_score = image_score
+                if image_score > candidate.score:
+                    candidate.score = image_score
+
             # 两道独立的门：口味像不像（score）与这个群值得不值得信（confidence）
             if candidate.score <= 0:
                 plan.rejected.append((group.group_key, candidate.reason))
@@ -112,6 +129,7 @@ class Router:
                     confidence=candidate.confidence,
                     source="llm",
                     reason=candidate.reason,
+                    image_score=candidate.image_score,
                 )
             )
 
@@ -128,9 +146,24 @@ class Router:
 
 
 def fingerprint_of(shit: ShitRecord) -> str:
-    """内容指纹：优先用规范化文本，图片类退化为载体+关键词。"""
+    """内容指纹：图片按 URL + 标签，文本按规范化正文。
+
+    图片类不能只用标签：同 tag 的两张不同图会被误判成重复；反过来，
+    同一张图被不同压缩/转发时 URL 也会变 —— 两个信号都带上，能同时
+    降低“误去重”和“漏去重”。
+    """
+    image_urls = [
+        str(segment.get("url") or "")
+        for segment in shit.payload
+        if isinstance(segment, dict) and segment.get("kind") == "image"
+    ]
+    image_urls = [url for url in image_urls if url]
+
     text = normalize_text(shit.text_blob)
-    if len(text) >= 8:
+    if image_urls:
+        tags = "/".join(sorted(shit.image_tags or shit.keywords))
+        base = f"{shit.kind.value}|{'|'.join(image_urls)}|{tags}"
+    elif len(text) >= 8:
         base = text
     else:
         base = f"{shit.kind.value}|{'/'.join(sorted(shit.keywords))}"

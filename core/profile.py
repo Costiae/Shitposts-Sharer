@@ -14,7 +14,7 @@ import math
 
 from .config import Settings
 from .models import GroupProfile, ShitRecord
-from .vector import blend_into, cosine, decay_weight
+from .vector import blend_into, cosine, decay_weight, merge_profile_terms
 
 
 def update_intake(
@@ -38,6 +38,13 @@ def update_intake(
     weight = decay_weight(shit.ts)
     addend = {key: value * weight for key, value in shit.vector.items()}
     group.intake = blend_into(before, addend, momentum=0.92 if is_native else 0.97)
+    # 每次新增样本都把整张口味表重新合并一遍：老词条（例如上次登记的
+    # “抽象话”）和新词条（“抽象”）必须收敛到同一个概念，否则向量会被
+    # 相近的写法稀释。
+    group.intake = merge_profile_terms(
+        group.intake,
+        threshold=float(settings.get("keyword_merge_threshold") or 0.6),
+    )
 
     # 偏移度做指数平滑：单次跳题只让稳定度轻微下降，连续跳题才会明显掉。
     # 第一次样本（before 为空）本来就没有参照，drift 恒为 0，不予惩罚。

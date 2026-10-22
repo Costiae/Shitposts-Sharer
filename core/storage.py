@@ -18,7 +18,7 @@ from typing import Any, Iterable
 
 from .models import Direction, GroupProfile, ShitRecord
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS groups (
@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS shits (
     fingerprint   TEXT NOT NULL DEFAULT '',
     incoming      INTEGER NOT NULL DEFAULT 0,
     tags_json     TEXT NOT NULL DEFAULT '[]',
+    image_tags_json   TEXT NOT NULL DEFAULT '[]',
+    image_vector_json TEXT NOT NULL DEFAULT '{}',
+    nsfw          INTEGER NOT NULL DEFAULT 0,
     intensity     REAL NOT NULL DEFAULT 0,
     context_included INTEGER NOT NULL DEFAULT 0,
     payload_json  TEXT NOT NULL DEFAULT '[]',
@@ -113,6 +116,7 @@ class Storage:
 
     def _migrate(self) -> None:
         self._migrate_group_columns()
+        self._migrate_shit_columns()
         self._migrate_direction_values()
         try:
             version = int(self.read_setting("schema_version", "0") or 0)
@@ -121,22 +125,34 @@ class Storage:
         if version < SCHEMA_VERSION:
             self.write_setting("schema_version", str(SCHEMA_VERSION))
 
-    def _migrate_group_columns(self) -> None:
-        """给老库补列。
-
-        ``CREATE TABLE IF NOT EXISTS`` 不会给已存在的表加字段，所以新增列
-        必须显式 ALTER。当前只有 ``drift``（口味偏移度），老库默认 0 即可
-        无感升级。
-        """
-        columns = {
+    def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
+        """按需给已存在的表补列（ALTER TABLE ADD COLUMN）。"""
+        existing = {
             row["name"]
-            for row in self._conn.execute("PRAGMA table_info(groups)").fetchall()
+            for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
         }
-        if "drift" not in columns:
-            self._conn.execute(
-                "ALTER TABLE groups ADD COLUMN drift REAL NOT NULL DEFAULT 0"
-            )
+        changed = False
+        for name, ddl in columns.items():
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                changed = True
+        if changed:
             self._conn.commit()
+
+    def _migrate_group_columns(self) -> None:
+        """groups.drift：口味偏移度的平滑值。"""
+        self._ensure_columns("groups", {"drift": "REAL NOT NULL DEFAULT 0"})
+
+    def _migrate_shit_columns(self) -> None:
+        """shits 的图片标签列（老库默认空，图片按原关键词逻辑匹配）。"""
+        self._ensure_columns(
+            "shits",
+            {
+                "image_tags_json": "TEXT NOT NULL DEFAULT '[]'",
+                "image_vector_json": "TEXT NOT NULL DEFAULT '{}'",
+                "nsfw": "INTEGER NOT NULL DEFAULT 0",
+            },
+        )
 
     def _migrate_direction_values(self) -> None:
         """in/out -> receive/emit。
@@ -276,6 +292,9 @@ class Storage:
             fingerprint=row["fingerprint"],
             incoming=bool(row["incoming"]),
             tags=json.loads(row["tags_json"] or "[]"),
+            image_tags=json.loads(row["image_tags_json"] or "[]"),
+            image_vector=json.loads(row["image_vector_json"] or "{}"),
+            nsfw=bool(row["nsfw"]),
             intensity=float(row["intensity"]),
             context_included=bool(row["context_included"]),
             payload=json.loads(row["payload_json"] or "[]"),
@@ -289,9 +308,10 @@ class Storage:
             """
             INSERT OR REPLACE INTO shits (
                 shit_id, source_group, created_at, kind, text_blob, keywords_json,
-                vector_json, fingerprint, incoming, tags_json, intensity,
-                context_included, payload_json, context_text, reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                vector_json, fingerprint, incoming, tags_json, image_tags_json,
+                image_vector_json, nsfw, intensity, context_included,
+                payload_json, context_text, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.shit_id,
@@ -304,6 +324,9 @@ class Storage:
                 record.fingerprint,
                 int(record.incoming),
                 json.dumps(record.tags, ensure_ascii=False),
+                json.dumps(record.image_tags, ensure_ascii=False),
+                json.dumps(record.image_vector, ensure_ascii=False),
+                int(record.nsfw),
                 record.intensity,
                 int(record.context_included),
                 json.dumps(record.payload, ensure_ascii=False),

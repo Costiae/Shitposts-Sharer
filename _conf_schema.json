@@ -76,6 +76,12 @@
     "type": "int",
     "default": 4
   },
+  "image_tagging": {
+    "description": "给图片打视觉标签",
+    "type": "bool",
+    "hint": "让模型输出角色 / 作品IP / 属性 / 风格标签，并单独用这些标签做口味匹配。关掉后图片仍可搬，但不会检查图片标签门槛。",
+    "default": true
+  },
   "trigger_cooldown_sec": {
     "description": "触发冷却（秒）",
     "type": "int",
@@ -168,8 +174,20 @@
   "keyword_merge_threshold": {
     "description": "相似关键词合并阈值",
     "type": "float",
-    "hint": "两条关键词的字符相似度达到这个值就视作同一个概念（例如 抽象 / 抽象话 / 抽象人 合并为 抽象），避免同一个方向被重复加权。越低合并越激进。",
+    "hint": "两条关键词的字符相似度达到这个值就视作同一个概念（例如 抽象 / 抽象话 / 抽象人 合并为 抽象），避免同一个方向被重复加权。每次新增关键词都会重新合并整张口味表。越低合并越激进。",
     "default": 0.6
+  },
+  "image_match_threshold": {
+    "description": "图片标签匹配阈值",
+    "type": "float",
+    "hint": "图片必须靠角色 / IP / 属性等视觉标签单独过这道门，达到相似度才允许搬给该群。文字话题匹配不能代替它。",
+    "default": 0.6
+  },
+  "image_match_tolerance": {
+    "description": "图片标签容差",
+    "type": "float",
+    "hint": "与关键词容差同理：在阈值下方这个范围内仍算勉强及格。",
+    "default": 0.12
   },
   "llm_rerank": {
     "description": "用 LLM 复核候选群",

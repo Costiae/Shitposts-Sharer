@@ -39,6 +39,24 @@ class KeywordMatcher:
             reason=reason,
         )
 
+    def image_match(self, shit: ShitRecord, group: GroupProfile) -> tuple[float, str]:
+        """只看图片视觉标签的匹配分。
+
+        图片通常没有正文，文字关键词匹配会失灵；所以图片单独用
+        ``image_vector`` 对群口味做一次余弦匹配，并走独立阈值。
+        """
+        if not shit.image_vector:
+            return 0.0, "没有图片标签"
+        raw = keyword_score(
+            shit.image_vector,
+            group.intake,
+            threshold=self.settings.image_match_threshold,
+            tolerance=self.settings.image_match_tolerance,
+        )
+        overlap = explain_overlap(shit.image_vector, group.intake)
+        reason = "图片标签：" + "、".join(overlap) if overlap else "图片标签无交集"
+        return raw, reason
+
     def rank(
         self, shit: ShitRecord, groups: list[GroupProfile], min_score: float = 0.0
     ) -> list[RouteCandidate]:

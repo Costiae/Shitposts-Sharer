@@ -22,6 +22,10 @@ SYSTEM = (
     "非日常内容；正常闲聊、日常问候、普通新闻、工作讨论不是屎。"
     "打分时请参照给定的锚点，不要让分数集中在中低段——"
     "如果内容确实值得搬，就大胆给高分。"
+    "图片类内容要按“角色、作品/IP、属性、风格”打结构化标签，供口味匹配使用；"
+    "不要输出露骨描写，只输出标签和结构化字段。"
+    "如果图片涉及未成年人的性化内容，必须设置 minor_sexual=true 且 is_shit=false，"
+    "这类内容永远不允许跨群搬运。"
     "你必须只输出一个 JSON 对象，不要输出任何解释性文字。"
 )
 
@@ -50,6 +54,9 @@ DEFAULT_SHIT_PROMPT = """请判断下面这坨群聊内容是不是“屎”（�
 - 猎奇、逆天、反直觉的内容
 - 强烈玩梗、黑话、圈内梗
 - 好笑且适合传播的图片或视频分享
+- 二次元/成人向的图片（露点、强烈性暗示、擦边）如果足够好看、稀有或对味，也算屎；
+  不要仅因为露骨就判否
+- 图片必须打结构化视觉标签：角色名、作品/IP、属性（发色/服装/姿势/场景）、画风
 - 正常聊天、问好、普通表情、日常信息 都不是屎
 
 注意：请同时判断上面候选内容与上下文之间有没有“话题关系”——
@@ -62,12 +69,20 @@ intensity 请按下面的锚点打分，不要给保守值：
 is_shit=false 时 intensity 可以为 0；但只要你判了 is_shit=true，
 就说明它确实值得传播，此时 intensity 应当落在 0.5 以上。
 
+安全要求：如果图片涉及未成年人的性化内容，必须 minor_sexual=true 且 is_shit=false。
+不要输出任何露骨描写。
+
 只输出 JSON：
 {{
   "is_shit": true/false,
   "intensity": 0.0 到 1.0，按上面的锚点打分,
   "tags": ["离谱", "玩梗", ...] 最多 5 个,
   "keywords": ["最能代表这坨屎话题的 3-8 个关键词，中文短语优先"],
+  "image_tags": ["图片视觉标签：角色/作品/IP/属性/风格，最多 8 个；无图填空数组"],
+  "characters": ["图中角色名，最多 5 个；无图填空数组"],
+  "copyrights": ["作品/IP 名，最多 3 个；无图填空数组"],
+  "nsfw": true/false,  // 是否成人向
+  "minor_sexual": true/false,  // 是否涉及未成年人的性化内容（安全闸门）
   "reason": "一句话理由，20 字以内",
   "context_relevant": true/false,  // 是否与上文话题相关
   "context_keywords": ["从上下文中提炼的 2-5 个关键词"],
@@ -353,4 +368,9 @@ def parse_analysis(data: dict[str, Any]) -> Analysis:
         context_relevant=bool(data.get("context_relevant", False)),
         context_keywords=as_list("context_keywords"),
         topic_seed=str(data.get("topic_seed", ""))[:200],
+        image_tags=as_list("image_tags"),
+        characters=as_list("characters"),
+        copyrights=as_list("copyrights"),
+        nsfw=bool(data.get("nsfw", False)),
+        minor_sexual=bool(data.get("minor_sexual", False)),
     )

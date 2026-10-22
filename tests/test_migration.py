@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.models import Direction  # noqa: E402
+from core.models import Direction, Kind, ShitRecord  # noqa: E402
 from core.storage import Storage  # noqa: E402
 from tests.test_core import scratch_path  # noqa: E402
 
@@ -173,7 +173,7 @@ class TestDriftColumnMigration(unittest.TestCase):
             group = storage.get_group("legacy")
             self.assertIsNotNone(group)
             self.assertEqual(group.drift, 0.0)
-            self.assertEqual(storage.read_setting("schema_version"), "2")
+            self.assertEqual(storage.read_setting("schema_version"), "3")
         finally:
             storage.close()
 
@@ -184,6 +184,66 @@ class TestDriftColumnMigration(unittest.TestCase):
         storage = Storage(self.db)
         try:
             self.assertEqual(storage.get_group("legacy").drift, 0.0)
+        finally:
+            storage.close()
+
+
+class TestShitImageColumnMigration(unittest.TestCase):
+    """老库的 shits 表没有图片标签列，加载时必须自动补齐。"""
+
+    def setUp(self):
+        self.db = scratch_path("migrate-shit-image")
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(self.db) + suffix).unlink(missing_ok=True)
+
+    def tearDown(self):
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(self.db) + suffix).unlink(missing_ok=True)
+
+    def _seed_v2_shits_schema(self):
+        conn = sqlite3.connect(self.db)
+        conn.executescript(
+            """
+            CREATE TABLE shits (
+                shit_id       TEXT PRIMARY KEY,
+                source_group  TEXT NOT NULL,
+                created_at    REAL NOT NULL,
+                kind          TEXT NOT NULL,
+                text_blob     TEXT NOT NULL DEFAULT '',
+                keywords_json TEXT NOT NULL DEFAULT '[]',
+                vector_json   TEXT NOT NULL DEFAULT '{}',
+                fingerprint   TEXT NOT NULL DEFAULT '',
+                incoming      INTEGER NOT NULL DEFAULT 0,
+                tags_json     TEXT NOT NULL DEFAULT '[]',
+                intensity     REAL NOT NULL DEFAULT 0,
+                context_included INTEGER NOT NULL DEFAULT 0,
+                payload_json  TEXT NOT NULL DEFAULT '[]',
+                context_text  TEXT NOT NULL DEFAULT '',
+                reason        TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def test_old_shits_table_gets_image_columns(self):
+        self._seed_v2_shits_schema()
+        storage = Storage(self.db)
+        try:
+            record = ShitRecord(
+                shit_id="s-img",
+                source_group="g",
+                kind=Kind.IMAGE,
+                text_blob="图",
+                image_tags=["初音未来", "NSFW"],
+                image_vector={"初音未来": 0.8, "nsfw": 0.2},
+                nsfw=True,
+            )
+            storage.add_shit(record)
+            loaded = storage.get_shit("s-img")
+            self.assertEqual(loaded.image_tags, ["初音未来", "NSFW"])
+            self.assertTrue(loaded.nsfw)
+            self.assertAlmostEqual(loaded.image_vector["初音未来"], 0.8)
         finally:
             storage.close()
 

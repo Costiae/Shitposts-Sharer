@@ -255,6 +255,11 @@ class ShitRecord:
     fingerprint: str = ""
     incoming: bool = False
     tags: list[str] = field(default_factory=list)
+    # 图片专属：视觉标签（角色 / IP / 属性 / 风格）与独立向量。
+    # 文本屎这两个字段为空，走原来的关键词匹配即可。
+    image_tags: list[str] = field(default_factory=list)
+    image_vector: dict[str, float] = field(default_factory=dict)
+    nsfw: bool = False
     intensity: float = 0.0
     context_included: bool = False
     payload: list[dict[str, Any]] = field(default_factory=list)
@@ -274,6 +279,13 @@ class Analysis:
     context_relevant: bool = False
     context_keywords: list[str] = field(default_factory=list)
     topic_seed: str = ""
+    # ---- 图片标记（无图时全为空） ----
+    image_tags: list[str] = field(default_factory=list)
+    characters: list[str] = field(default_factory=list)
+    copyrights: list[str] = field(default_factory=list)
+    nsfw: bool = False
+    # 安全闸门：涉及未成年人的性化内容，永不搬运
+    minor_sexual: bool = False
 
 
 @dataclass(slots=True)
@@ -285,6 +297,8 @@ class RouteCandidate:
     confidence: float
     source: str = "keyword"  # keyword | llm
     reason: str = ""
+    # 图片专属：只看图片标签时的匹配分（0 表示没有图片标签或未匹配）
+    image_score: float = 0.0
 
     @property
     def final_score(self) -> float:

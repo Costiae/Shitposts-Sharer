@@ -152,6 +152,68 @@ def merge_similar_keywords(
     return merged
 
 
+def merge_profile_terms(
+    profile: dict[str, float],
+    threshold: float = 0.6,
+    max_terms: int = 512,
+) -> dict[str, float]:
+    """把**整个口味词表**里的相似关键词合并，再重新归一化。
+
+    与 ``merge_similar_keywords`` 的区别：那个只看一批新关键词，这个处理
+    已经存在的老词条。群口味是长期累积的，之前登记过 ``抽象话``，今天又
+    学到 ``抽象``，如果只在新增时去重，老词条会永远留在向量里并稀释
+    权重。所以每次 ``update_intake`` 都要调用一次。
+
+    合并时把相似词条的权重**相加**（它们本来就是同一个概念的证据），
+    最后统一归一化，避免向量模长漂移。
+    """
+    if len(profile) < 2:
+        return dict(profile)
+
+    terms = [
+        (str(term), float(weight))
+        for term, weight in profile.items()
+        if term and weight > 0
+    ]
+    if not terms:
+        return {}
+
+    # 并查集：相似关系要传递。只按权重顺序贪心聚类的话，
+    # “抽象话 / 抽象人 / 抽象” 里如果先处理没有桥接的两条，就会漏合并。
+    parent = list(range(len(terms)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        root_left, root_right = find(left), find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    for i in range(len(terms)):
+        for j in range(i + 1, len(terms)):
+            if keyword_similarity(terms[i][0], terms[j][0]) >= threshold:
+                union(i, j)
+
+    clusters: dict[int, list[tuple[str, float]]] = defaultdict(list)
+    for index, item in enumerate(terms):
+        clusters[find(index)].append(item)
+
+    merged: dict[str, float] = {}
+    for members in clusters.values():
+        # 更短的写法更通用；长度相同则保留权重更高的
+        canonical = min(members, key=lambda item: (len(item[0]), -item[1]))[0]
+        merged[canonical] = sum(weight for _, weight in members)
+
+    if len(merged) > max_terms:
+        kept = sorted(merged.items(), key=lambda item: item[1], reverse=True)[:max_terms]
+        merged = dict(kept)
+    return normalized_vector(merged)
+
+
 def blend_into(
     profile: dict[str, float],
     addend: dict[str, float],

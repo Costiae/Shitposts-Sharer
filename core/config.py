@@ -32,6 +32,9 @@ DEFAULTS: dict[str, Any] = {
     "expand_forward": True,
     "image_llm": True,
     "max_images_per_message": 4,
+    # 让模型给图片打视觉标签（角色 / IP / 属性 / 风格），用于口味匹配。
+    # 关掉后图片仍可搬，但不会做“图片标签门槛”。
+    "image_tagging": True,
     "trigger_cooldown_sec": 30,
     # ---- 上下文 ----
     "history_max_messages": 40,
@@ -53,6 +56,10 @@ DEFAULTS: dict[str, Any] = {
     # 相似关键词合并：两条关键词的字符/短语相似度达到这个值就视作同一个概念，
     # 避免“抽象 / 抽象话 / 抽象人”把同一个方向重复加权。
     "keyword_merge_threshold": 0.6,
+    # 图片专属：只看视觉标签的匹配门槛。达到这个相似度（含容差带）才允许
+    # 把图搬给该群，避免“文字话题对上了，但图完全不对胃口”。
+    "image_match_threshold": 0.6,
+    "image_match_tolerance": 0.12,
     "llm_rerank": True,
     "llm_candidates": 3,
     "max_targets": 0,
@@ -109,6 +116,18 @@ class Settings:
     @property
     def keyword_merge_threshold(self) -> float:
         return min(1.0, max(0.0, float(self.get("keyword_merge_threshold"))))
+
+    @property
+    def image_tagging(self) -> bool:
+        return bool(self.get("image_tagging", True))
+
+    @property
+    def image_match_threshold(self) -> float:
+        return min(1.0, max(0.0, float(self.get("image_match_threshold"))))
+
+    @property
+    def image_match_tolerance(self) -> float:
+        return min(1.0, max(0.0, float(self.get("image_match_tolerance"))))
 
     @property
     def forward_min_nodes(self) -> int:

@@ -90,10 +90,13 @@ class TestPipeline(unittest.TestCase):
         self.db = scratch_path("pipeline")
         self.storage = Storage(self.db)
         self._original_plain = sender_module._plain
+        self._original_image = sender_module._image
         sender_module._plain = _stub_plain
+        sender_module._image = lambda url: StubComponent(f"Image({url})")
 
     def tearDown(self) -> None:
         sender_module._plain = self._original_plain
+        sender_module._image = self._original_image
         self.storage.close()
         for suffix in ("", "-wal", "-shm"):
             Path(str(self.db) + suffix).unlink(missing_ok=True)
@@ -203,6 +206,76 @@ class TestPipeline(unittest.TestCase):
         result = asyncio.run(pipeline.handle_suspicion(pipeline.accumulator.open(message, "长文本")))
         self.assertIn("sink", result["delivered"])
         self.assertNotIn("src", result["delivered"])
+
+    def test_image_delivered_only_to_group_matching_visual_tags(self):
+        from core.vector import build_vector
+
+        self._setup_groups()
+        self.settings.raw["llm_rerank"] = False
+        sink = self.storage.get_group("sink")
+        sink.intake = build_vector(["初音未来", "白丝"], "", 0.9)
+        self.storage.upsert_group(sink)
+
+        judge = (
+            '{"is_shit": true, "intensity": 0.9, "tags": ["好看"],'
+            ' "keywords": ["初音未来"], "image_tags": ["初音未来", "白丝"],'
+            ' "characters": ["初音未来"], "copyrights": ["VOCALOID"],'
+            ' "nsfw": true, "minor_sexual": false, "reason": "对味"}'
+        )
+        context = FakeContext([judge])
+        pipeline = Pipeline(
+            context=context,
+            settings=self.settings,
+            storage=self.storage,
+            logger=QuietLogger(),
+        )
+        message = Message(
+            group_key="src",
+            segments=[Segment(kind="image", url="http://x/cute.png")],
+        )
+        result = asyncio.run(
+            pipeline.handle_suspicion(pipeline.accumulator.open(message, "媒体"))
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["delivered"], ["sink"])
+        self.assertIn("图片标签", dict(result["rejected"])["other"])
+
+        record = self.storage.get_shit(result["shit_id"])
+        self.assertEqual(record.kind.value, "image")
+        self.assertIn("初音未来", record.image_tags)
+        self.assertIn("NSFW", record.image_tags)
+        self.assertTrue(record.nsfw)
+        self.assertGreater(max(record.image_vector.values()), 0.0)
+
+    def test_minor_sexual_content_is_hard_blocked(self):
+        self._setup_groups()
+        self.settings.raw["llm_rerank"] = False
+
+        judge = (
+            '{"is_shit": true, "intensity": 0.95, "image_tags": ["测试标签"],'
+            ' "nsfw": true, "minor_sexual": true, "reason": "安全拦截"}'
+        )
+        context = FakeContext([judge])
+        pipeline = Pipeline(
+            context=context,
+            settings=self.settings,
+            storage=self.storage,
+            logger=QuietLogger(),
+        )
+        message = Message(
+            group_key="src",
+            segments=[Segment(kind="image", url="http://x/blocked.png")],
+        )
+        result = asyncio.run(
+            pipeline.handle_suspicion(pipeline.accumulator.open(message, "媒体"))
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(context.sent, [])
+        self.assertEqual(pipeline.stats.blocked_safety, 1)
+        # 不进口味、不入库，避免以后被重新路由出去
+        self.assertEqual(self.storage.get_group("src").native_message_count, 0)
 
 
 if __name__ == "__main__":

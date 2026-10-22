@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 from core.accumulator import ContextAccumulator  # noqa: E402
 from core.bili import extract_bili_ids  # noqa: E402
 from core.config import DEFAULTS, Settings  # noqa: E402
+from core.analyzer import parse_analysis  # noqa: E402
 from core.detector import (  # noqa: E402
     _component_type,
     is_there_a_shit,
@@ -41,6 +42,7 @@ from core.vector import (  # noqa: E402
     cosine,
     keyword_score,
     keyword_similarity,
+    merge_profile_terms,
     merge_similar_keywords,
 )
 
@@ -72,6 +74,21 @@ def make_shit(text: str, keywords: list[str], group_key: str = "g-source") -> Sh
         text_blob=text,
         keywords=keywords,
         vector=build_vector(keywords, text, 0.8),
+    )
+    record.fingerprint = fingerprint_of(record)
+    return record
+
+
+def make_image_shit(url: str = "http://x/a.png") -> ShitRecord:
+    record = ShitRecord(
+        shit_id="img1",
+        source_group="g-source",
+        kind=Kind.IMAGE,
+        text_blob="",
+        keywords=["初音未来", "白丝"],
+        image_tags=["初音未来", "白丝"],
+        image_vector=build_vector(["初音未来", "白丝"], "", 0.8),
+        payload=[{"kind": "image", "url": url}],
     )
     record.fingerprint = fingerprint_of(record)
     return record
@@ -313,6 +330,72 @@ class TestKeywordMerge(unittest.TestCase):
         self.assertEqual(single, variants)
 
 
+class TestProfileMerge(unittest.TestCase):
+    """口味表是长期累积的，老词条也要收敛，不能只合并新来的那一批。"""
+
+    def test_merge_profile_terms_collapses_whole_vocabulary(self):
+        merged = merge_profile_terms(
+            {"抽象话": 3.0, "抽象人": 2.0, "抽象": 1.0, "离谱": 4.0}
+        )
+        self.assertIn("抽象", merged)
+        self.assertIn("离谱", merged)
+        self.assertEqual(len(merged), 2)
+        # 相似词条的权重相加，再整体归一化
+        self.assertGreater(merged["抽象"], merged["离谱"])
+        self.assertAlmostEqual(sum(value * value for value in merged.values()), 1.0)
+
+    def test_update_intake_merges_previously_registered_terms(self):
+        settings = make_settings()
+        group = GroupProfile(group_key="g", intake={"抽象话": 1.0, "抽象人": 1.0})
+        shit = make_shit("抽象发言", ["抽象"])
+        update_intake(group, shit, settings, is_native=True)
+        self.assertIn("抽象", group.intake)
+        self.assertNotIn("抽象话", group.intake)
+        self.assertNotIn("抽象人", group.intake)
+
+    def test_merge_is_transitive_and_order_independent(self):
+        # “抽象话”和“抽象人”本身都不够像，但它们都能被“抽象”桥接；
+        # 合并不应该依赖字典遍历顺序。
+        forward = merge_profile_terms({"抽象话": 3.0, "抽象人": 2.0, "抽象": 1.0})
+        backward = merge_profile_terms({"抽象": 1.0, "抽象人": 2.0, "抽象话": 3.0})
+        self.assertEqual(forward, backward)
+        self.assertEqual(list(forward), ["抽象"])
+
+
+class TestAnalysisParsing(unittest.TestCase):
+    def test_image_fields_are_parsed(self):
+        analysis = parse_analysis(
+            {
+                "is_shit": True,
+                "intensity": 0.8,
+                "image_tags": ["初音未来", "白丝"],
+                "characters": ["初音未来"],
+                "copyrights": ["VOCALOID"],
+                "nsfw": True,
+                "minor_sexual": False,
+            }
+        )
+        self.assertEqual(analysis.image_tags, ["初音未来", "白丝"])
+        self.assertEqual(analysis.characters, ["初音未来"])
+        self.assertEqual(analysis.copyrights, ["VOCALOID"])
+        self.assertTrue(analysis.nsfw)
+        self.assertFalse(analysis.minor_sexual)
+
+    def test_missing_image_fields_default_to_empty(self):
+        analysis = parse_analysis({"is_shit": True, "intensity": 0.7})
+        self.assertEqual(analysis.image_tags, [])
+        self.assertEqual(analysis.characters, [])
+        self.assertEqual(analysis.copyrights, [])
+        self.assertFalse(analysis.nsfw)
+        self.assertFalse(analysis.minor_sexual)
+
+    def test_minor_sexual_flag_is_parsed(self):
+        analysis = parse_analysis(
+            {"is_shit": False, "intensity": 0, "minor_sexual": True}
+        )
+        self.assertTrue(analysis.minor_sexual)
+
+
 class TestConfidenceConsistency(unittest.TestCase):
     def test_group_confidence_matches_profile_formula(self):
         group = make_group("g", native=12)
@@ -390,6 +473,53 @@ class TestRouter(unittest.TestCase):
         self.assertTrue(plan.rejected)
 
 
+class TestImageGate(unittest.TestCase):
+    """图片必须靠视觉标签过门槛，文字话题对上了也不能代替。"""
+
+    def setUp(self):
+        self.settings = make_settings(threshold_overall=0.0)
+        self.router = Router(self.settings)
+
+    def _group(self, key: str, tags: list[str]) -> GroupProfile:
+        return GroupProfile(
+            group_key=key,
+            direction=Direction.RECEIVE,
+            intake=build_vector(tags, "", 0.8),
+            native_message_count=20,
+            native_char_count=1000,
+        )
+
+    def test_image_is_routed_by_visual_tags(self):
+        shit = make_image_shit()
+        groups = [
+            self._group("likes", ["初音未来", "白丝"]),
+            self._group("other", ["考研", "数学"]),
+        ]
+        plan = self.router.keyword_plan(shit, groups, exclude={"g-source"})
+        self.assertIn("likes", plan.group_keys())
+        self.assertNotIn("other", plan.group_keys())
+        reasons = dict(plan.rejected)
+        self.assertIn("图片标签", reasons["other"])
+        self.assertGreater(plan.candidates[0].image_score, 0.0)
+
+    def test_text_match_cannot_bypass_image_gate(self):
+        shit = make_image_shit()
+        # 文字向量和该群高度一致，但视觉标签完全对不上
+        shit.vector = build_vector(["抽象", "离谱"], "抽象离谱", 0.8)
+        shit.image_vector = build_vector(["初音未来", "白丝"], "", 0.8)
+        group = self._group("text-only", ["抽象", "离谱"])
+        plan = self.router.keyword_plan(shit, [group], exclude={"g-source"})
+        self.assertNotIn("text-only", plan.group_keys())
+        self.assertIn("图片标签", dict(plan.rejected)["text-only"])
+
+    def test_different_images_have_different_fingerprints(self):
+        first = make_image_shit("http://x/a.png")
+        second = make_image_shit("http://x/b.png")
+        same = make_image_shit("http://x/a.png")
+        self.assertNotEqual(first.fingerprint, second.fingerprint)
+        self.assertEqual(first.fingerprint, same.fingerprint)
+
+
 _WORKDIR = ROOT / "tests" / "_scratch"
 _seq = itertools.count()
 
@@ -440,6 +570,15 @@ class TestStorage(unittest.TestCase):
         group.drift = 0.42
         self.storage.upsert_group(group)
         self.assertAlmostEqual(self.storage.get_group("g-drift").drift, 0.42)
+
+    def test_image_fields_are_persisted(self):
+        image = make_image_shit()
+        image.nsfw = True
+        self.storage.add_shit(image)
+        loaded = self.storage.get_shit(image.shit_id)
+        self.assertEqual(loaded.image_tags, ["初音未来", "白丝"])
+        self.assertTrue(loaded.nsfw)
+        self.assertGreater(max(loaded.image_vector.values()), 0.0)
 
 
 class TestJsonParsing(unittest.TestCase):

@@ -49,6 +49,7 @@ class PipelineStats:
     delivered: int = 0
     failed: int = 0
     rejected_intensity: int = 0
+    blocked_safety: int = 0
     last_error: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -60,6 +61,7 @@ class PipelineStats:
             "delivered": self.delivered,
             "failed": self.failed,
             "rejected_intensity": self.rejected_intensity,
+            "blocked_safety": self.blocked_safety,
             "last_error": self.last_error,
         }
 
@@ -368,12 +370,20 @@ class Pipeline:
 
         analysis = verdict.analysis
 
+        # 安全闸门：涉及未成年人的性化内容永不搬运，也不入库。
+        # 这是硬性规则，不提供配置开关。
+        if analysis.minor_sexual:
+            self.stats.blocked_safety += 1
+            trace.skip("safety: sexualized minor content is never relayed")
+            return None
+
         # 留痕：判没判、判成啥、分数够不够，一眼可辨。
         # 没有这行时，“判成不是屎”和“分数被阈值挡掉”在日志里长得一模一样。
         min_intensity = float(self.settings.get("shit_min_intensity") or 0.0)
         trace.step(
             f"model raw: is_shit={analysis.is_shit} intensity={analysis.intensity:.2f} "
-            f"tags={analysis.tags} keywords={analysis.keywords[:5]}"
+            f"tags={analysis.tags} keywords={analysis.keywords[:5]} "
+            f"image_tags={analysis.image_tags[:5]} nsfw={analysis.nsfw}"
         )
 
         if not analysis.is_shit:
@@ -402,6 +412,31 @@ class Pipeline:
             [*analysis.keywords, *analysis.context_keywords],
             threshold=merge_threshold,
         )
+
+        # 图片标签：角色 / IP / 属性 / 风格，和文字关键词一样参与口味匹配。
+        # 只有图片消息才打；无图或关闭 image_tagging 时为空，退回纯文字匹配。
+        image_tags: list[str] = []
+        if self.settings.image_tagging and kind == "image":
+            image_tags = merge_similar_keywords(
+                [*analysis.image_tags, *analysis.characters, *analysis.copyrights],
+                threshold=merge_threshold,
+            )
+            if analysis.nsfw:
+                image_tags.append("NSFW")
+            if image_tags:
+                trace.step(f"image tags: {image_tags} nsfw={analysis.nsfw}")
+
+        image_vector = (
+            build_vector(
+                image_tags,
+                "",
+                analysis.intensity,
+                merge_threshold=merge_threshold,
+            )
+            if image_tags
+            else {}
+        )
+
         blob = normalize_text(
             "\n".join(
                 part
@@ -409,12 +444,13 @@ class Pipeline:
                     text,
                     " ".join(info.title for info in bili_infos if info.title),
                     " ".join(analysis.tags),
+                    " ".join(image_tags),
                 ]
                 if part
             )
         )
         vector = build_vector(
-            keywords,
+            [*keywords, *image_tags],
             blob,
             analysis.intensity,
             analysis.tags,
@@ -439,6 +475,9 @@ class Pipeline:
             keywords=keywords,
             vector=vector,
             tags=list(analysis.tags),
+            image_tags=image_tags,
+            image_vector=image_vector,
+            nsfw=analysis.nsfw,
             intensity=analysis.intensity,
             context_included=self.settings.get("with_context", True),
             payload=[seg.to_dict() for seg in message.segments],
@@ -490,7 +529,7 @@ class Pipeline:
             }
             scores = await self.analyzer.score_groups(
                 shit_text=blob[:1500],
-                shit_keywords=keywords,
+                shit_keywords=[*keywords, *image_tags],
                 groups=[groups[item.group_key] for item in top if item.group_key in groups],
                 umo=record.source_group,
             )
@@ -547,7 +586,7 @@ class Pipeline:
         trace.result(
             f"shit={record.shit_id[:8]} from={group_key} "
             f"intensity={analysis.intensity:.2f} keywords={keywords[:5]} "
-            f"delivered={delivered or 'none'}"
+            f"image_tags={image_tags[:5] or 'none'} delivered={delivered or 'none'}"
         )
         if trace.level == "full":
             trace.step(f"trail: {trace.summary()}")
