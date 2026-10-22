@@ -43,6 +43,11 @@ HELP_TEXT = """Shitposts Sharer commands
   /shit purge [target]                                delete a group (admin)
   /shit help                                          this text
 
+Debug (admin):
+  /shit debug [target]                                show every gate and why it failed
+  /shit tags [target]                                 dump taste terms (all groups if omitted)
+  /shit forceout [target]                             ignore direction/taste/confidence, relay now
+  /shit forcein [target]                              force this message into the intake path
   /shoot <text>                                       admin: test one payload
 
 Direction: in = receive only, out = emit only, both = receive and emit.
@@ -51,14 +56,37 @@ Handling a group other than the current one requires admin."""
 
 @dataclass(slots=True)
 class CommandResult:
+    """指令层的纯数据结果。
+
+    刻意不继承、不叫 CommandResult 之外的任何名字：AstrBot 也导出了一个
+    ``CommandResult``（= MessageEventResult 的别名）。两者在 isinstance 判定里
+    互不相干，幸好我们用 ``from .core.commands import ...`` 显式导入，
+    不会串到 AstrBot 那个。
+    """
+
     text: str
     ok: bool = True
 
 
 class Commands:
-    def __init__(self, storage: Storage, settings: Settings) -> None:
+    def __init__(
+        self,
+        storage: Storage,
+        settings: Settings,
+        *,
+        probe_llm: Any = None,
+        probe_pipeline: Any = None,
+        probe_force: Any = None,
+    ) -> None:
         self.storage = storage
         self.settings = settings
+        # 可选探针：调试指令要读运行时状态，但指令层不该直接依赖 pipeline。
+        # probe_llm        -> 有 .available 属性
+        # probe_pipeline   -> 有 .pending() 方法
+        # probe_force      -> 有 .run(event, target_key, incoming) 方法
+        self.probe_llm = probe_llm
+        self.probe_pipeline = probe_pipeline
+        self.probe_force = probe_force
 
     # ------------------------------------------------------------------ 主分发
     def dispatch(
@@ -88,7 +116,155 @@ class Commands:
             return self.purge(event, rest, is_admin=is_admin)
         if action in ("help", "h", "?"):
             return CommandResult(HELP_TEXT)
+
+        # ---- debug surface (admin) ----
+        if action in ("debug", "dbg"):
+            return self.debug(event, rest, is_admin=is_admin)
+        if action in ("tags", "tag"):
+            return self.tags(event, rest, is_admin=is_admin)
+        if action in ("forceout", "force_out", "chout"):
+            # 当作源屎，忽略方向/口味/可信度，直接推出去
+            return self.force_delivery(event, rest, is_admin=is_admin, incoming=True)
+        if action in ("forcein", "force_in", "chin"):
+            # 当作被搬入的屎，只更新目标群口味，不外发
+            return self.force_delivery(event, rest, is_admin=is_admin, incoming=False)
+
         return CommandResult(f"Unknown subcommand: {action}\n\n{HELP_TEXT}", ok=False)
+
+    # ------------------------------------------------------------------ 调试
+    def debug(
+        self, event: Any, args: list[str], *, is_admin: bool = False
+    ) -> CommandResult:
+        """把判定链路里每一道闸门的结果都摊开，专门用来排查“为什么没搬”。"""
+        if not is_admin:
+            return CommandResult("Admin only.", ok=False)
+
+        token = args[0] if args else ""
+        resolution = resolve(self.storage, event, token)
+        if not resolution.ok:
+            return CommandResult(
+                f"Target not found: {token or '(current)'}. "
+                f"Use /shit debug inside a registered group.",
+                ok=False,
+            )
+        group = resolution.group
+        assert group is not None
+
+        confidence = self._confidence(group)
+        threshold = self.settings.threshold_for(group.threshold)
+        enabled = bool(self.settings.get("enabled"))
+        watch_only = bool(self.settings.get("watch_only_registered"))
+        rerank = bool(self.settings.get("llm_rerank"))
+        llm_ok = getattr(self.probe_llm, "available", None) if hasattr(self, "probe_llm") else None
+
+        checks = [
+            ("plugin enabled", enabled),
+            ("group registered", True),
+            ("group enabled", group.enabled),
+            ("can emit (direction)", group.direction.can_emit),
+            ("can receive (direction)", group.direction.can_receive),
+            ("confidence >= threshold", confidence >= threshold),
+            ("watch only registered", watch_only),
+            ("llm rerank", rerank),
+        ]
+        lines = [f"debug: {describe_group(group)}"]
+        for label, ok in checks:
+            lines.append(f"  [{'PASS' if ok else 'FAIL'}] {label}")
+        lines.append(
+            f"  confidence {confidence:.3f} vs threshold {threshold:.3f} "
+            f"(k={self.settings.confidence_k:g})"
+        )
+        lines.append(
+            f"  keyword_threshold={self.settings.keyword_threshold:.2f} "
+            f"tolerance={self.settings.keyword_tolerance:.2f}"
+        )
+        lines.append(f"  native={group.native_message_count} chars={group.native_char_count}")
+        if llm_ok is not None:
+            lines.append(f"  llm available: {llm_ok}")
+        if group.intake:
+            top = sorted(group.intake.items(), key=lambda kv: kv[1], reverse=True)[:8]
+            lines.append("  top taste terms: " + ", ".join(f"{k}:{v:.3f}" for k, v in top))
+        else:
+            lines.append("  top taste terms: (empty)")
+
+        pending = getattr(self.probe_pipeline, "pending", None)
+        if callable(pending):
+            lines.append(f"  open windows: {pending()}")
+        return CommandResult("\n".join(lines))
+
+    def tags(
+        self, event: Any, args: list[str], *, is_admin: bool = False
+    ) -> CommandResult:
+        """输出一个群的 tag 全貌，或者所有群的 tag 汇总。"""
+        if not is_admin:
+            return CommandResult("Admin only.", ok=False)
+
+        token = args[0] if args else ""
+        if token:
+            resolution = resolve(self.storage, event, token)
+            if not resolution.ok:
+                return CommandResult(f"Target not found: {token}", ok=False)
+            group = resolution.group
+            assert group is not None
+            terms = sorted(group.intake.items(), key=lambda kv: kv[1], reverse=True)
+            if not terms:
+                return CommandResult(
+                    f"{describe_group(group)}\ntags: (none yet - no shit judged here)"
+                )
+            body = "\n".join(f"  {key}: {value:.4f}" for key, value in terms[:60])
+            return CommandResult(
+                f"{describe_group(group)}\n"
+                f"direction={group.direction.value} confidence={self._confidence(group):.2f}\n"
+                f"intake terms ({len(terms)}):\n{body}"
+            )
+
+        groups = self.storage.list_groups()
+        if not groups:
+            return CommandResult("No group registered yet.")
+        lines = []
+        for group in groups:
+            terms = sorted(group.intake.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            shown = ", ".join(key for key, _ in terms) or "-"
+            lines.append(
+                f"{group.group_key} [{group.direction.value}] "
+                f"top: {shown}"
+            )
+        return CommandResult(
+            "group tags (top 5 each; /shit tags <target> for full list)\n"
+            + "\n".join(lines)
+        )
+
+    # ------------------------------------------------------------------ 强制搬运
+    def force_delivery(
+        self, event: Any, args: list[str], *, is_admin: bool = False, incoming: bool
+    ) -> CommandResult:
+        """无条件搬运的调试入口。
+
+        incoming=True  : 忽略方向、可信度、相似度，强制“某个源群”把当前这条搬出去
+        incoming=False : 忽略方向，强制把当前消息推进“接收侧”的处理链路
+
+        真正执行需要 pipeline 在场，这里只做参数与目标解析，把动作交给 runner。
+        """
+        if not is_admin:
+            return CommandResult("Admin only.", ok=False)
+
+        runner = getattr(self.probe_force, "run", None)
+        if not callable(runner):
+            return CommandResult(
+                "Force delivery is unavailable: pipeline not wired.", ok=False
+            )
+
+        token = args[0] if args else ""
+        target = resolve(self.storage, event, token) if token else None
+        target_key = target.group.group_key if target and target.ok and target.group else ""
+        if token and not target_key:
+            return CommandResult(f"Target not found: {token}", ok=False)
+
+        try:
+            outcome = runner(event, target_key, incoming)
+        except Exception as exc:  # pragma: no cover - defensive
+            return CommandResult(f"Force delivery failed: {type(exc).__name__}: {exc}", ok=False)
+        return CommandResult(outcome if isinstance(outcome, str) else str(outcome))
 
     # ------------------------------------------------------------------ 目标解析
     def _target(

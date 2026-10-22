@@ -45,14 +45,21 @@ class ShitpostsSharer(Star):
         self.db_path = data_dir / "shitposts.sqlite3"
 
         self.storage = Storage(self.db_path)
-        self.commands = Commands(self.storage, self.settings)
         self.pipeline = Pipeline(
             context=self.context,
             settings=self.settings,
             storage=self.storage,
             logger=Loggerish(logger),
         )
-        logger.info(f"搬屎插件已加载，数据库：{self.db_path}")
+        # 调试指令要读运行时状态，通过探针注入而不是让指令层依赖 pipeline
+        self.commands = Commands(
+            self.storage,
+            self.settings,
+            probe_llm=self.pipeline.llm,
+            probe_pipeline=self.pipeline,
+            probe_force=self.pipeline,
+        )
+        logger.info(f"Shitposts Sharer loaded, db: {self.db_path}")
 
     async def initialize(self) -> None:
         await self.pipeline.start()
@@ -71,23 +78,24 @@ class ShitpostsSharer(Star):
     # ------------------------------------------------------------------ 指令
     @filter.command(COMMAND, alias=ALIASES)
     async def shit(self, event: AstrMessageEvent, *args):
-        """/shit <subcommand>: register, status, threshold, ..."""
-        text = event.message_str.strip()
-        parts = text.split()
-        # 去掉命令词本身（含中文别名）
-        if parts and _strip_slash(parts[0]) in {COMMAND, *ALIASES}:
-            parts = parts[1:]
+        """/shit <subcommand>: register, status, threshold, ...
+
+        NOTE: this handler must never let its own exceptions escape. AstrBot
+        turns an uncaught exception into an error traceback posted straight
+        into the group, which is exactly how a plugin looks broken.
+        """
+        parts = _command_args(event, {COMMAND, *ALIASES})
 
         try:
-            result: CommandResult = self.commands.dispatch(
+            result = self.commands.dispatch(
                 event, parts, is_admin=_is_admin(event)
             )
-        except Exception as exc:  # pragma: no cover
+            text = result.text
+        except Exception as exc:  # pragma: no cover - defensive
             logger.error(f"shit command failed: {type(exc).__name__}: {exc}")
-            yield event.plain_result("Command failed, see the log for details.")
-            return
+            text = "Command failed, see the AstrBot log."
 
-        yield event.plain_result(result.text)
+        yield event.plain_result(text or "(empty)")
 
     @filter.command("shoot", alias={"manual"})
     async def manual_shot(self, event: AstrMessageEvent, *args):
@@ -134,6 +142,20 @@ class ShitpostsSharer(Star):
 
 def _strip_slash(token: str) -> str:
     return token.lstrip("/").lower()
+
+
+def _command_args(event: AstrMessageEvent, names: set[str]) -> list[str]:
+    """从原始消息里取出指令后的参数。
+
+    不用装饰器注入的 args：AstrBot 会把 handler 签名里 ``*args`` 之后的参数
+    当作 parsed params 传进来，而有 ``*args`` 时它只能给空。直接切 message_str
+    更稳，也能顺带支持别名。
+    """
+    text = (getattr(event, "message_str", "") or "").strip()
+    parts = text.split()
+    if parts and _strip_slash(parts[0]) in names:
+        parts = parts[1:]
+    return [part for part in parts if part]
 
 
 def _resolve_data_dir() -> Path:

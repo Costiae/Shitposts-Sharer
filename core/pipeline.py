@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -379,6 +380,110 @@ class Pipeline:
             self.stats.last_error = result.detail
             self.logger.warning(f"搬运到 {target.group_key} 失败：{result.detail}")
         return result.ok
+
+    # ------------------------------------------------------------------ 调试
+    def pending(self) -> int:
+        """当前有多少个上下文窗口还在积累（调试指令用）。"""
+        return self.accumulator.pending()
+
+    def _message_from_event(self, event: Any):
+        group_key = str(getattr(event, "unified_msg_origin", "") or "")
+        if not group_key:
+            return None
+        return self._enrich(message_from_event(event, group_key))
+
+    async def force_delivery(
+        self,
+        event: Any,
+        target_key: str = "",
+        incoming: bool = True,
+    ) -> dict[str, Any]:
+        """无条件搬运：跳过方向、可信度、相似度与 LLM 复核。
+
+        ``incoming=True``  当前消息当作“源屎”，直接推到所有能收的群，
+                           ``target_key`` 非空时只推到那个群；
+        ``incoming=False`` 当前消息当作“被搬入的屎”，只更新目标群口味，
+                           不往外发。
+
+        这是调试入口，会真实发消息，所以只挂在管理员指令下。
+        """
+        message = self._message_from_event(event)
+        if message is None:
+            return {"ok": False, "detail": "no session"}
+
+        text = message.text()
+        group = self.storage.get_group(message.group_key)
+        blob = normalize_text(text) or f"{message.kind_hint()}"
+        record = ShitRecord(
+            shit_id=f"force-{uuid.uuid4().hex[:12]}",
+            source_group=message.group_key,
+            ts=time.time(),
+            kind=Kind(analysis_kind(message.kind_hint())),
+            text_blob=blob,
+            keywords=[token for token in tokenize(blob)[:8]],
+            vector=build_vector([], blob, 0.5),
+            payload=[seg.to_dict() for seg in message.segments],
+            reason="forced (debug)",
+        )
+        record.fingerprint = fingerprint_of(record)
+        self.storage.add_shit(record)
+
+        if not incoming:
+            target = self.storage.get_group(target_key) if target_key else group
+            if target is None:
+                return {"ok": False, "detail": f"target not registered: {target_key}"}
+            update_intake(target, record, self.settings, is_native=False)
+            self.storage.upsert_group(target)
+            return {"ok": True, "detail": f"intake updated for {target.group_key}"}
+
+        groups = self.storage.list_groups()
+        if target_key:
+            groups = [item for item in groups if item.group_key == target_key]
+
+        delivered: list[str] = []
+        failed: list[str] = []
+        for item in groups:
+            if not item.enabled:
+                continue
+            ok = await self._deliver(record, item, group)
+            self.storage.record_delivery(
+                record.shit_id, item.group_key, 1.0, 1.0, "forced", "ok" if ok else "fail"
+            )
+            if ok:
+                delivered.append(item.group_key)
+                self.stats.delivered += 1
+            else:
+                failed.append(item.group_key)
+                self.stats.failed += 1
+
+        return {
+            "ok": bool(delivered),
+            "detail": f"delivered={delivered or '-'} failed={failed or '-'}",
+        }
+
+    def run(self, event: Any, target_key: str, incoming: bool) -> str:
+        """同步桥：指令层是同步的，这里把协程跑完并返回文本。"""
+        try:
+            result = asyncio.run(
+                self.force_delivery(event, target_key, incoming)
+            )
+        except RuntimeError:
+            # 已经有事件循环在跑（AstrBot 主循环）：开新线程跑
+            box: dict[str, Any] = {}
+
+            def _worker() -> None:
+                box["value"] = asyncio.run(
+                    self.force_delivery(event, target_key, incoming)
+                )
+
+            thread = threading.Thread(target=_worker)
+            thread.start()
+            thread.join()
+            result = box.get("value", {"ok": False, "detail": "worker failed"})
+        except Exception as exc:  # pragma: no cover - defensive
+            return f"force failed: {type(exc).__name__}: {exc}"
+
+        return str(result.get("detail", result))
 
     # ------------------------------------------------------------------ 统计
     def describe_group(self, group: GroupProfile) -> str:

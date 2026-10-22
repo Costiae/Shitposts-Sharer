@@ -1,0 +1,28 @@
+fix: never leak handler exceptions into the group; add debug commands
+
+The /shit help failure surfaced as an AstrBot plugin-error traceback
+posted into the group. Root causes:
+
+- core/commands.CommandResult collides in name with AstrBot's
+  CommandResult alias (= MessageEventResult). Keeping our own dataclass
+  but documenting it, and never returning it from the handler.
+- The handler let its own exceptions escape, so any bug became a raw
+  traceback in the chat.
+- Relying on decorator-injected *args is fragile: with a *args
+  signature AstrBot cannot fill parsed params, so argv is now parsed
+  from message_str directly.
+
+New admin-only debug surface:
+- /shit debug [target]  full gate breakdown, why nothing moved
+- /shit tags [target]   dump taste vector terms
+- /shit forceout        unconditional relay, ignores direction/taste/
+                        confidence/LLM rerank
+- /shit forcein         unconditional intake, updates taste, no send
+
+Pipeline gains pending(), force_delivery() and run() (sync bridge for
+the sync command layer). Commands takes optional probes instead of
+importing the pipeline.
+
+Tests: 47 (was 34), including a handler-level regression that proves an
+exception becomes plain text, and a stubbed-astrbot loader so main.py
+is actually exercised.
