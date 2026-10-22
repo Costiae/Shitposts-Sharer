@@ -11,6 +11,12 @@ from typing import Any, Iterable
 
 from .bili import extract_bili_ids
 from .config import Settings
+from .forward import (
+    fetch_forward_nodes,
+    node_content,
+    node_sender_name,
+    onebot_segment_to_text,
+)
 from .models import Message, Segment
 
 # B站：BV 号、b23 短链、视频页
@@ -52,7 +58,13 @@ def segment_from_component(comp: Any, depth: int = 0) -> Segment | None:
         return Segment(kind=kind, url=str(getattr(comp, "url", "") or getattr(comp, "file", "") or ""))
 
     if kind in ("forward", "nodes", "node") or hasattr(comp, "node_list") or hasattr(comp, "nodes"):
-        return Segment(kind="forward", children=_forward_children(comp, depth))
+        # Forward 组件只有 id；存在 url 字段里，供 expand_forward 回源取正文
+        forward_id = str(getattr(comp, "id", "") or getattr(comp, "res_id", "") or "")
+        return Segment(
+            kind="forward",
+            url=forward_id,
+            children=_forward_children(comp, depth),
+        )
 
     if kind in ("json", "miniapp", "xml"):
         data = getattr(comp, "data", "") or ""
@@ -63,6 +75,11 @@ def segment_from_component(comp: Any, depth: int = 0) -> Segment | None:
 
 
 def _forward_children(comp: Any, depth: int) -> list[Segment]:
+    """从组件的 node_list/nodes 里取子节点。
+
+    NOTE: AstrBot 的 ``Forward`` 组件只有 ``id``，从不带 node_list ——
+    未展开的转发请走 ``expand_forward``。
+    """
     if depth > 2:  # 防御嵌套爆炸
         return []
     nodes = getattr(comp, "node_list", None) or getattr(comp, "nodes", None) or []
@@ -88,8 +105,21 @@ def _forward_children(comp: Any, depth: int) -> list[Segment]:
     return children
 
 
+def _segments_from_onebot_nodes(nodes: list[Any]) -> list[Segment]:
+    """把 get_forward_msg 的节点列表转成 Segment。"""
+    children: list[Segment] = []
+    for node in nodes:
+        name = node_sender_name(node) or "群友"
+        children.append(Segment(kind="plain", text=f"[{name}]"))
+        for piece in node_content(node):
+            text = onebot_segment_to_text(piece)
+            if text:
+                children.append(Segment(kind="plain", text=text))
+    return children
+
+
 def message_from_event(event: Any, group_key: str) -> Message:
-    """把 AstrMessageEvent 翻译成 Message。"""
+    """把 AstrMessageEvent 翻译成 Message（不展开转发，见 expand_forward）。"""
     obj = getattr(event, "message_obj", None)
     components = getattr(obj, "message", None) or []
 
@@ -113,6 +143,36 @@ def message_from_event(event: Any, group_key: str) -> Message:
         ts=float(getattr(obj, "time", 0) or 0) or __import__("time").time(),
         raw=event,
     )
+
+
+async def expand_forward(message: Message, context: Any) -> Message:
+    """把消息里每个空壳 Forward 换成真实内容。
+
+    AstrBot 的 Forward 组件只有 id，napcat 默认 parseMultMsg=false 时
+    它是彻底的空的。这里调 get_forward_msg 补齐，避免要求用户改
+    napcat 全局配置（那会影响所有插件，还可能要求重新扫码登录）。
+
+    取不到就原样返回，上层仍按「空转发」处理，不会崩。
+    """
+    pending = [
+        seg
+        for seg in message.segments
+        if seg.kind == "forward" and not seg.children
+    ]
+    if not pending:
+        return message
+
+    for segment in pending:
+        forward_id = str(getattr(segment, "url", "") or "")
+        if not forward_id:
+            continue
+        nodes = await fetch_forward_nodes(context, forward_id)
+        if not nodes:
+            continue
+        children = _segments_from_onebot_nodes(nodes)
+        if children:
+            segment.children = children
+    return message
 
 
 def is_there_a_shit(message: Message, settings: Settings) -> tuple[bool, str]:

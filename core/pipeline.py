@@ -17,7 +17,12 @@ from .accumulator import ContextAccumulator, Suspicion
 from .analyzer import Analyzer
 from .bili import BiliResolver, bili_card_hint, extract_bili_ids
 from .config import Settings
-from .detector import is_there_a_shit, looks_like_image_only, message_from_event
+from .detector import (
+    expand_forward,
+    is_there_a_shit,
+    looks_like_image_only,
+    message_from_event,
+)
 from .llm import LLMClient
 from .models import (
     Direction,
@@ -168,7 +173,11 @@ class Pipeline:
             return
 
         self.stats.seen += 1
-        message = self._enrich(message_from_event(event, group_key))
+        message = message_from_event(event, group_key)
+        if self.settings.get("expand_forward", True):
+            # AstrBot 的 Forward 只有 id，napcat 也没展开；这里补回来
+            message = await expand_forward(message, self.context)
+        message = self._enrich(message)
         self.accumulator.observe(message, has_bili=bool(self._bili_refs(message.text())))
 
         interesting, reason = is_there_a_shit(message, self.settings)
@@ -393,6 +402,15 @@ class Pipeline:
             return None
         return self._enrich(message_from_event(event, group_key))
 
+    async def _message_from_event_expanded(self, event: Any):
+        """同 _message_from_event，但把合并转发展开（force 指令用）。"""
+        message = self._message_from_event(event)
+        if message is None:
+            return None
+        if self.settings.get("expand_forward", True):
+            message = await expand_forward(message, self.context)
+        return message
+
     async def force_delivery(
         self,
         event: Any,
@@ -408,7 +426,7 @@ class Pipeline:
 
         这是调试入口，会真实发消息，所以只挂在管理员指令下。
         """
-        message = self._message_from_event(event)
+        message = await self._message_from_event_expanded(event)
         if message is None:
             return {"ok": False, "detail": "no session"}
 

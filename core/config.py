@@ -15,6 +15,7 @@ DEFAULTS: dict[str, Any] = {
     "watch_only_registered": True,
     "text_min_chars": 60,
     "forward_min_nodes": 1,
+    "expand_forward": True,
     "image_llm": True,
     "max_images_per_message": 4,
     "trigger_cooldown_sec": 30,

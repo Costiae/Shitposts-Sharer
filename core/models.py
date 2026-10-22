@@ -111,6 +111,9 @@ class Segment:
                 child.plain_text(depth + 1) for child in self.children if child is not None
             )
             return f"{pad}[转发{self.text or ''}:{depth}]\n{inner}"
+        if self.kind == "forward":
+            # 未展开的合并转发：明确说“看不到内容”，而不是伪装成媒体
+            return pad + "[合并转发：内容未展开]"
         return pad + f"[{self.kind}]{self.text}"
 
 

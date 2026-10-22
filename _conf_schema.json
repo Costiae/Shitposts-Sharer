@@ -23,6 +23,12 @@
     "hint": "至少几条的合并转发才值得看。",
     "default": 1
   },
+  "expand_forward": {
+    "description": "自动展开合并转发",
+    "type": "bool",
+    "hint": "AstrBot 收到的 Forward 组件只有 id、没有正文；开启后插件自己调 get_forward_msg 取回内容。关掉的话模型只能看到空壳，转发消息基本必判“不是屎”。需要 NapCat/LLOneBot 等 OneBot 实现支持该接口。",
+    "default": true
+  },
   "image_llm": {
     "description": "图片交给多模态模型",
     "type": "bool",
