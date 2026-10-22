@@ -193,6 +193,16 @@ class Commands:
         pending = getattr(self.probe_pipeline, "pending", None)
         if callable(pending):
             lines.append(f"  open windows: {pending()}")
+
+        # ticker 健康状况：它是「抓到了但永远不判定」的唯一嫌疑犯，
+        # 所以必须在调试输出里能直接看到，而不是靠猜。
+        for attr in ("ticker_alive", "flush_blocked"):
+            probe = getattr(self.probe_pipeline, attr, None)
+            if callable(probe):
+                try:
+                    lines.append(f"  {attr.replace('_', ' ')}: {probe()}")
+                except Exception:  # pragma: no cover - 探针坏了不该拖垮指令
+                    pass
         return CommandResult("\n".join(lines))
 
     def tags(

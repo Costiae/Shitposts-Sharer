@@ -140,6 +140,7 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `log_level` | normal | `off` / `normal` / `full`，见下节 |
+| `judge_timeout_sec` | 180 | 单条判定超时，防止一条卡死拖垮收盘循环 |
 | `enabled` | true | 总开关 |
 | `watch_only_registered` | true | 只处理已注册群 |
 | `expand_forward` | true | 自动调 `get_forward_msg` 展开合并转发 |
@@ -179,6 +180,20 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 
 **关键**：如果群里发了消息，但日志里连 `[shit] entry` 都没有，说明消息在到
 插件之前就被 AstrBot 拦掉了（未唤醒 / 白名单 / 平台没上报）—— 这不是插件的问题。
+
+## 收盘循环的健壮性
+
+「抓到了东西，但之后既没有 result 也没有错误」是这个插件最容易出现的故障。
+原因一定是 90 秒窗口没能收盘。`_ticker` 为此做了四重保护：
+
+| 保护 | 日志 | 作用 |
+| --- | --- | --- |
+| 异常不退出循环 | `ticker \| CRASHED: ...` | 一次 `closed database` 不会永久废掉收盘机制 |
+| 取消也留痕 | `ticker \| CANCELLED` | 被谁取消的不再是谜 |
+| 上一轮未返回 | `ticker \| flush still running ...` | 长 LLM 重试导致的空转不再伪装成安静 |
+| 单条超时 | `judge \| TIMEOUT after 180s` | 一条卡住不拖死整个循环 |
+
+`/shit debug` 会直接给出 `ticker alive` 和 `flush blocked` 两项状态，不用猜。
 
 ## 依赖
 

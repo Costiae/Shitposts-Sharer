@@ -5,6 +5,12 @@
     "hint": "off = 只写搬运结果；normal = 每条消息是否被俘获及被哪道闸门挡下（推荐）；full = 每一层每一步，含模型输入摘要、原始输出、关键词、候选群打分。所有日志前缀 [shit]，便于 grep。",
     "default": "normal"
   },
+  "judge_timeout_sec": {
+    "description": "单条判定超时（秒）",
+    "type": "int",
+    "hint": "一次 LLM 判定最多等多久，超时后放弃这一条并继续。LLM 的 429 重试可能长达数分钟，没有这个上限时一条卡住会拖死整个收盘循环（表现为「抓到了但永远不判定」）。",
+    "default": 180
+  },
   "enabled": {
     "description": "启用搬屎",
     "type": "bool",

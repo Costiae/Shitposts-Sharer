@@ -15,6 +15,9 @@ DEFAULTS: dict[str, Any] = {
     # normal = 每条可疑消息的结论 + 被挡原因（默认）
     # full   = 每一层每一步，含模型输入摘要与原始输出
     "log_level": "normal",
+    # 单条判定的超时（秒）。LLM 429 重试可达数分钟，一条卡住会拖死
+    # 整个收盘循环，所以必须兜底。
+    "judge_timeout_sec": 180,
     # ---- 触发 ----
     "enabled": True,
     "watch_only_registered": True,

@@ -107,6 +107,7 @@ class Pipeline:
     _task: Any = field(init=False, repr=False, default=None)
     _flushing: bool = field(init=False, repr=False, default=False)
     _cooldown: Any = field(init=False, repr=False, default=None)
+    _tick_seconds: float = field(init=False, repr=False, default=3.0)
 
     def __post_init__(self) -> None:
         self.llm = LLMClient(self.context)
@@ -118,11 +119,13 @@ class Pipeline:
         self._cooldown = {}
         self._task = None
         self._flushing = False
+        self._tick_seconds = 3.0
 
     # ------------------------------------------------------------------ 生命周期
     async def start(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._ticker())
+            self.logger.info("[shit] ticker | started")
 
     async def stop(self) -> None:
         if self._task and not self._task.done():
@@ -134,28 +137,108 @@ class Pipeline:
         self._task = None
 
     async def _ticker(self) -> None:
-        """定时收盘：把攒够时间的现场送去分析。"""
+        """定时收盘：把攒够时间的现场送去分析。
+
+        这个循环必须**永远活着**。它一死，on_event 照常收消息、照样打
+        CAUGHT，但窗口永远不收盘 —— 表现就是「抓到了东西」之后再无下文，
+        而且没有任何报错。所以这里的三条规矩：
+
+        1. CancelledError 也要留痕，否则「被谁取消的」永远是谜；
+        2. 任何异常都不退出循环，记完日志继续转；
+        3. 连续多轮 flush 不出去时主动告警，不让卡死伪装成安静。
+        """
+        starved = 0
         while True:
             try:
-                await asyncio.sleep(3)
+                await asyncio.sleep(self._tick_seconds)
+                pending = self.accumulator.pending()
+                stuck = self.flush_blocked()
+                if stuck:
+                    starved += 1
+                    self.logger.warning(
+                        f"[shit] ticker | flush still running, "
+                        f"{pending} window(s) waiting ({starved} tick(s) starved)"
+                    )
+                else:
+                    if starved:
+                        self.logger.warning(
+                            f"[shit] ticker | recovered after {starved} starved tick(s)"
+                        )
+                    starved = 0
+                    if pending and self.logger is not None:
+                        self.logger.debug(
+                            f"[shit] ticker | alive, {pending} window(s) pending"
+                        )
                 await self.flush_due()
             except asyncio.CancelledError:
+                self.logger.warning("[shit] ticker | CANCELLED, loop is ending")
                 raise
-            except Exception as exc:  # pragma: no cover
+            except Exception as exc:
                 self.stats.last_error = f"{type(exc).__name__}: {exc}"
-                self.logger.error(f"收盘轮询出错：{exc}")
+                self.logger.error(
+                    f"[shit] ticker | CRASHED: {type(exc).__name__}: {exc}"
+                )
+                # 关键：不 raise，让循环活下去。否则一次 closed database
+                # 就永久废掉整个收盘机制。
+                try:
+                    await asyncio.sleep(self._tick_seconds)
+                except asyncio.CancelledError:
+                    self.logger.warning("[shit] ticker | CANCELLED, loop is ending")
+                    raise
+
+    def flush_blocked(self) -> bool:
+        """上一轮 flush 是否还没回来（调试与心跳都用这个）。"""
+        return self._flushing
 
     async def flush_due(self, now: float | None = None) -> list[Any]:
         if self._flushing:
+            # 不要静默返回：上一轮还卡着的话，这里每 3 秒无声跳过，
+            # 现场看起来就跟「ticker 死了」一模一样。
             return []
         self._flushing = True
+        started = time.time()
         try:
             results = []
             for group_key, suspicion in self.accumulator.due(now):
-                results.append(await self.handle_suspicion(suspicion))
+                results.append(await self._handle_with_timeout(suspicion))
             return results
         finally:
             self._flushing = False
+            spent = time.time() - started
+            if spent > self._tick_seconds * 2:
+                self.logger.warning(
+                    f"[shit] ticker | flush took {spent:.1f}s (blocked the loop)"
+                )
+
+    async def _handle_with_timeout(self, suspicion: Suspicion) -> Any:
+        """单条判定加超时。
+
+        LLM 的 429 重试可能长达数分钟（retry in 59s × 5），而
+        handle_suspicion 里没有任何超时保护 —— 一条卡住就拖死整个
+        收盘循环。这里给它兜底，超时后把现场标记为失败并继续。
+        """
+        limit = float(self.settings.get("judge_timeout_sec") or 180)
+        try:
+            return await asyncio.wait_for(
+                self.handle_suspicion(suspicion), timeout=limit
+            )
+        except asyncio.TimeoutError:
+            self.stats.last_error = f"judge timed out after {limit:.0f}s"
+            self.logger.error(
+                f"[shit] judge | TIMEOUT after {limit:.0f}s "
+                f"({suspicion.message.group_key}) - likely LLM retry storm"
+            )
+            return None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # 单个现场炸了不该拖累别的群
+            self.stats.last_error = f"{type(exc).__name__}: {exc}"
+            self.logger.error(
+                f"[shit] judge | FAILED: {type(exc).__name__}: {exc} "
+                f"({suspicion.message.group_key})"
+            )
+            return None
 
     # ------------------------------------------------------------------ 入口
     async def on_event(self, event: Any) -> None:
@@ -501,6 +584,10 @@ class Pipeline:
     def pending(self) -> int:
         """当前有多少个上下文窗口还在积累（调试指令用）。"""
         return self.accumulator.pending()
+
+    def ticker_alive(self) -> bool:
+        """收盘循环是否还活着（调试指令用）。"""
+        return self._task is not None and not self._task.done()
 
     def _message_from_event(self, event: Any):
         group_key = str(getattr(event, "unified_msg_origin", "") or "")
