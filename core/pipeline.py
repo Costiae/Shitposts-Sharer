@@ -32,12 +32,12 @@ from .models import (
     ShitRecord,
     normalize_text,
 )
-from .profile import confidence_score, describe_intake, update_intake
+from .profile import describe_intake, update_intake
 from .router import Router, fingerprint_of
 from .sender import build_chain, send_to_group
 from .storage import Storage
 from .tracelog import Trace, describe_message, describe_segments
-from .vector import build_vector, tokenize
+from .vector import build_vector, merge_similar_keywords, tokenize
 
 
 @dataclass(slots=True)
@@ -290,9 +290,11 @@ class Pipeline:
         trace.gate("detect")
         interesting, reason = is_there_a_shit(message, self.settings)
         if not interesting:
+            soft = self.settings.soft_text_min_chars if self.settings.loose_detect else 0
             trace.skip(
                 f"not suspicious need={self.settings.text_min_chars}chars "
-                f"got={message.char_count()} kinds={sorted(message.kinds())}"
+                f"soft={soft or '-'} got={message.char_count()} "
+                f"kinds={sorted(message.kinds())}"
             )
             return
 
@@ -395,7 +397,11 @@ class Pipeline:
             f"reason={analysis.reason!r}"
         )
 
-        keywords = list(dict.fromkeys([*analysis.keywords, *analysis.context_keywords]))
+        merge_threshold = float(self.settings.get("keyword_merge_threshold") or 0.6)
+        keywords = merge_similar_keywords(
+            [*analysis.keywords, *analysis.context_keywords],
+            threshold=merge_threshold,
+        )
         blob = normalize_text(
             "\n".join(
                 part
@@ -407,10 +413,22 @@ class Pipeline:
                 if part
             )
         )
-        vector = build_vector(keywords, blob, analysis.intensity, analysis.tags)
+        vector = build_vector(
+            keywords,
+            blob,
+            analysis.intensity,
+            analysis.tags,
+            merge_threshold=merge_threshold,
+        )
         if not vector:
             # 兜底：至少用正文分词，不然这条屎永远匹配不上任何群
-            vector = build_vector([], blob, analysis.intensity, analysis.tags)
+            vector = build_vector(
+                [],
+                blob,
+                analysis.intensity,
+                analysis.tags,
+                merge_threshold=merge_threshold,
+            )
 
         record = ShitRecord(
             shit_id=uuid.uuid4().hex,
@@ -700,14 +718,7 @@ class Pipeline:
     # ------------------------------------------------------------------ 统计
     def describe_group(self, group: GroupProfile) -> str:
         recent = self.storage.recent_deliveries(group.group_key, limit=5)
-        confidence = confidence_score(
-            native_messages=group.native_message_count,
-            native_chars=group.native_char_count,
-            drift=0.0,
-            accepted=group.accepted_count,
-            rejected=group.rejected_count,
-            k=self.settings.confidence_k,
-        )
+        confidence = group.confidence(self.settings.confidence_k)
         lines = [
             f"群：{group.name or group.group_key}",
             f"方向：{group.direction.label()}（{group.direction.describe()}）",

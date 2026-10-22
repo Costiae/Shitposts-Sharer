@@ -20,7 +20,7 @@ from typing import Any
 
 from .config import Settings
 from .models import Direction, GroupProfile
-from .profile import confidence_score, describe_intake
+from .profile import describe_intake
 from .storage import Storage
 from .targets import (
     current_origin,
@@ -182,6 +182,10 @@ class Commands:
             f"tolerance={self.settings.keyword_tolerance:.2f}"
         )
         lines.append(f"  native={group.native_message_count} chars={group.native_char_count}")
+        lines.append(
+            f"  drift={group.drift:.3f} (stability {1 - 0.6 * group.drift:.3f}) "
+            f"accepted={group.accepted_count} rejected={group.rejected_count}"
+        )
         if llm_ok is not None:
             lines.append(f"  llm available: {llm_ok}")
         if group.intake:
@@ -471,6 +475,7 @@ class Commands:
             f"confidence: {confidence:.2f} (threshold {threshold:.2f}) -> {verdict}\n"
             f"native    : {group.native_message_count} shit(s), "
             f"{group.native_char_count} chars\n"
+            f"drift     : {group.drift:.2f} (stability {1 - 0.6 * group.drift:.2f})\n"
             f"accepted  : {group.accepted_count}  rejected: {group.rejected_count}\n"
             f"taste     : {describe_intake(group)}"
         )
@@ -527,14 +532,8 @@ class Commands:
 
     # ------------------------------------------------------------------ 工具
     def _confidence(self, group: GroupProfile) -> float:
-        return confidence_score(
-            native_messages=group.native_message_count,
-            native_chars=group.native_char_count,
-            drift=0.0,
-            accepted=group.accepted_count,
-            rejected=group.rejected_count,
-            k=self.settings.confidence_k,
-        )
+        """与路由层共用 GroupProfile.confidence，避免两套算法打架。"""
+        return group.confidence(self.settings.confidence_k)
 
 
 # ---------------------------------------------------------------------- 工具

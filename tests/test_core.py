@@ -19,7 +19,11 @@ if str(ROOT) not in sys.path:
 from core.accumulator import ContextAccumulator  # noqa: E402
 from core.bili import extract_bili_ids  # noqa: E402
 from core.config import DEFAULTS, Settings  # noqa: E402
-from core.detector import is_there_a_shit  # noqa: E402
+from core.detector import (  # noqa: E402
+    _component_type,
+    is_there_a_shit,
+    segment_from_component,
+)
 from core.llm import extract_json  # noqa: E402
 from core.models import (  # noqa: E402
     Direction,
@@ -32,7 +36,13 @@ from core.models import (  # noqa: E402
 from core.profile import confidence_score, update_intake  # noqa: E402
 from core.router import Router, fingerprint_of  # noqa: E402
 from core.storage import Storage  # noqa: E402
-from core.vector import build_vector, cosine, keyword_score  # noqa: E402
+from core.vector import (  # noqa: E402
+    build_vector,
+    cosine,
+    keyword_score,
+    keyword_similarity,
+    merge_similar_keywords,
+)
 
 
 def make_settings(**overrides) -> Settings:
@@ -182,6 +192,165 @@ class TestDetector(unittest.TestCase):
         refs = extract_bili_ids("看 https://www.bilibili.com/video/BV1xx411c7mD 和 BV1xx411c7mD")
         self.assertEqual(refs.bvids, ["BV1xx411c7mD"])
 
+    # ---- 松闸门 ----
+    def test_loose_marker_short_text_is_suspicious(self):
+        message = Message(group_key="g", segments=[Segment(kind="plain", text="这也太逆天了吧")])
+        interesting, reason = is_there_a_shit(message, self.settings)
+        self.assertTrue(interesting)
+        self.assertIn("玩梗短句", reason)
+        self.assertIn("逆天", reason)
+
+    def test_medium_text_is_suspicious(self):
+        text = "今天群里发生了一件很怪的事情大家快来看看"  # 20 字，低于软阈值
+        self.assertEqual(len(text), 20)
+        message = Message(group_key="g", segments=[Segment(kind="plain", text=text)])
+        self.assertFalse(is_there_a_shit(message, self.settings)[0])
+
+        longer = text + "真的吗？"  # 24 字，达到软阈值
+        message = Message(group_key="g", segments=[Segment(kind="plain", text=longer)])
+        interesting, reason = is_there_a_shit(message, self.settings)
+        self.assertTrue(interesting)
+        self.assertIn("中等文本", reason)
+
+    def test_media_and_link_are_suspicious(self):
+        voice = Message(group_key="g", segments=[Segment(kind="record", url="http://x/a.mp3")])
+        self.assertIn("媒体", is_there_a_shit(voice, self.settings)[1])
+
+        link = Message(
+            group_key="g",
+            segments=[Segment(kind="plain", text="看 https://example.com/a 这个")],
+        )
+        self.assertIn("链接分享", is_there_a_shit(link, self.settings)[1])
+
+    def test_loose_gate_can_be_disabled(self):
+        settings = make_settings(loose_detect=False)
+        marker = Message(group_key="g", segments=[Segment(kind="plain", text="太逆天了")])
+        self.assertFalse(is_there_a_shit(marker, settings)[0])
+
+        medium = Message(
+            group_key="g",
+            segments=[Segment(kind="plain", text="今天群里发生了一件很怪的事情大家快来看看真的吗？")],
+        )
+        self.assertFalse(is_there_a_shit(medium, settings)[0])
+
+    def test_forward_min_nodes_is_honored(self):
+        settings = make_settings(forward_min_nodes=3)
+        thin = Message(
+            group_key="g",
+            segments=[
+                Segment(
+                    kind="forward", children=[Segment(kind="plain", text="只有一条")]
+                )
+            ],
+        )
+        self.assertFalse(is_there_a_shit(thin, settings)[0])
+
+        thick = Message(
+            group_key="g",
+            segments=[
+                Segment(
+                    kind="forward",
+                    children=[Segment(kind="plain", text=f"第{i}条") for i in range(3)],
+                )
+            ],
+        )
+        self.assertTrue(is_there_a_shit(thick, settings)[0])
+
+
+class TestComponentType(unittest.TestCase):
+    """AstrBot 的 ComponentType 是 Enum，必须取 .value，否则整条识别链断掉。"""
+
+    def test_enum_value_is_unwrapped(self):
+        class FakeEnum:
+            value = "Plain"
+
+            def __str__(self):  # 模拟非 StrEnum 的 str(ComponentType.Plain)
+                return "ComponentType.Plain"
+
+        class Comp:
+            type = FakeEnum()
+
+        self.assertEqual(_component_type(Comp()), "plain")
+
+    def test_string_type_still_works(self):
+        class Comp:
+            type = "Image"
+
+        self.assertEqual(_component_type(Comp()), "image")
+
+    def test_segment_kind_survives_enum(self):
+        class FakeEnum:
+            value = "Image"
+
+            def __str__(self):
+                return "ComponentType.Image"
+
+        class Comp:
+            type = FakeEnum()
+            url = "http://x/y.png"
+
+        segment = segment_from_component(Comp())
+        self.assertEqual(segment.kind, "image")
+        self.assertEqual(segment.url, "http://x/y.png")
+
+
+class TestKeywordMerge(unittest.TestCase):
+    def test_similar_keywords_collapse_to_shortest(self):
+        merged = merge_similar_keywords(["抽象话", "抽象", "抽象人"])
+        self.assertEqual(merged, ["抽象"])
+
+    def test_different_keywords_are_kept(self):
+        merged = merge_similar_keywords(["考研", "数学", "玩梗"])
+        self.assertEqual(merged, ["考研", "数学", "玩梗"])
+
+    def test_similarity_threshold(self):
+        self.assertGreater(keyword_similarity("抽象", "抽象话"), 0.6)
+        self.assertEqual(keyword_similarity("抽象", "考研"), 0.0)
+
+    def test_build_vector_does_not_double_count_variants(self):
+        single = build_vector(["抽象"], "抽象发言", 0.8)
+        variants = build_vector(["抽象", "抽象话", "抽象人"], "抽象发言", 0.8)
+        self.assertEqual(single, variants)
+
+
+class TestConfidenceConsistency(unittest.TestCase):
+    def test_group_confidence_matches_profile_formula(self):
+        group = make_group("g", native=12)
+        group.native_char_count = 900
+        group.drift = 0.4
+        group.accepted_count = 7
+        group.rejected_count = 3
+        self.assertAlmostEqual(
+            group.confidence(10.0),
+            confidence_score(
+                native_messages=12,
+                native_chars=900,
+                drift=0.4,
+                accepted=7,
+                rejected=3,
+                k=10.0,
+            ),
+            places=9,
+        )
+
+    def test_drift_lowers_confidence(self):
+        stable = make_group("stable", native=80)
+        unstable = make_group("unstable", native=80)
+        unstable.drift = 0.9
+        self.assertLess(unstable.confidence(10.0), stable.confidence(10.0))
+
+    def test_update_intake_records_drift_after_topic_switch(self):
+        settings = make_settings()
+        group = GroupProfile(group_key="g")  # 空档案：第一条样本没有参照
+        first = make_shit("抽象离谱的逆天发言", ["抽象", "逆天"])
+        update_intake(group, first, settings, is_native=True)
+        self.assertEqual(group.drift, 0.0)
+
+        second = make_shit("考研数学复习进度", ["考研", "数学"])
+        drift = update_intake(group, second, settings, is_native=True)
+        self.assertGreater(drift, 0.0)
+        self.assertGreater(group.drift, 0.0)
+
 
 class TestRouter(unittest.TestCase):
     def setUp(self):
@@ -265,6 +434,12 @@ class TestStorage(unittest.TestCase):
         )
         self.assertTrue(self.storage.delete_group("g1"))
         self.assertIsNone(self.storage.get_group("g1"))
+
+    def test_drift_is_persisted(self):
+        group = make_group("g-drift")
+        group.drift = 0.42
+        self.storage.upsert_group(group)
+        self.assertAlmostEqual(self.storage.get_group("g-drift").drift, 0.42)
 
 
 class TestJsonParsing(unittest.TestCase):

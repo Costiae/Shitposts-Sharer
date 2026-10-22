@@ -54,15 +54,21 @@ def build_vector(
     text: str,
     intensity: float = 0.0,
     tags: Iterable[str] = (),
+    *,
+    merge_threshold: float = 0.6,
 ) -> dict[str, float]:
     """关键词加权 → 归一化向量。
 
     LLM 给出的关键词权重最高（它们是“话题脊”，不是噪音），
     正文分词次之，标签作为弱先验。强度只调整整体尺度，不改变方向。
+
+    关键词会先做一次**相似合并**：``抽象 / 抽象话 / 抽象人`` 这类同一个
+    概念的不同写法只按一个关键词计权，否则共享的双字窗口会被重复累加，
+    让一个方向在向量里被人为放大。
     """
     weights: dict[str, float] = defaultdict(float)
 
-    for keyword in keywords:
+    for keyword in merge_similar_keywords(keywords, threshold=merge_threshold):
         for token in tokenize(str(keyword)):
             weights[token] += 3.0
 
@@ -78,6 +84,72 @@ def build_vector(
 
     scale = 1.0 + max(0.0, min(intensity, 1.0))
     return normalized_vector({key: value * scale for key, value in weights.items()})
+
+
+# ---------------------------------------------------------------------- 关键词合并
+_PUNCT_RE = re.compile(r"[\s\W_]+", re.UNICODE)
+
+
+def _keyword_core(text: str) -> str:
+    """去掉空格/标点并转小写，只留下比较用的“词核”。"""
+    return _PUNCT_RE.sub("", str(text or "")).lower()
+
+
+def _keyword_grams(text: str) -> set[str]:
+    """字符二元组集合；与向量分词保持同一粒度。"""
+    if not text:
+        return set()
+    if len(text) <= 2:
+        return {text}
+    return {text[index : index + 2] for index in range(len(text) - 1)}
+
+
+def keyword_similarity(a: str, b: str) -> float:
+    """两条关键词有多像（0~1）。
+
+    两个信号取最大值：
+    - 包含关系：短词是长词的子串，相似度 = 短/长（"抽象" ⊂ "抽象话" = 0.67）；
+    - 字符二元组 Jaccard：处理顺序不同、只共享一部分的短语。
+    """
+    left, right = _keyword_core(a), _keyword_core(b)
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+
+    shorter, longer = sorted((left, right), key=len)
+    containment = 0.0
+    if len(shorter) >= 2 and shorter in longer:
+        containment = len(shorter) / len(longer)
+
+    left_grams, right_grams = _keyword_grams(left), _keyword_grams(right)
+    union = left_grams | right_grams
+    jaccard = len(left_grams & right_grams) / len(union) if union else 0.0
+    return max(containment, jaccard)
+
+
+def merge_similar_keywords(
+    keywords: Iterable[str], threshold: float = 0.6
+) -> list[str]:
+    """把相似关键词合并成一条，保留先出现的顺序。
+
+    合并后保留**更短**的写法（通常是更通用的那个），例如
+    ``["抽象话", "抽象"]`` → ``["抽象"]``。阈值越低合并越激进。
+    """
+    merged: list[str] = []
+    for raw in keywords:
+        keyword = str(raw or "").strip()
+        if not keyword:
+            continue
+        for index, existing in enumerate(merged):
+            if keyword_similarity(keyword, existing) >= threshold:
+                # 更短的写法更通用；长度相同则保留先出现的
+                if len(keyword) < len(existing):
+                    merged[index] = keyword
+                break
+        else:
+            merged.append(keyword)
+    return merged
 
 
 def blend_into(

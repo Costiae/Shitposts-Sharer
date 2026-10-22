@@ -22,6 +22,12 @@ DEFAULTS: dict[str, Any] = {
     "enabled": True,
     "watch_only_registered": True,
     "text_min_chars": 60,
+    # 松闸门：中等长度文本 / 短句里的梗信号也送审。真正的判断仍交给 LLM，
+    # 这里只负责“别漏”，所以默认开。
+    "loose_detect": True,
+    "soft_text_min_chars": 24,
+    "detect_links": True,
+    "detect_media": True,
     "forward_min_nodes": 1,
     "expand_forward": True,
     "image_llm": True,
@@ -44,6 +50,9 @@ DEFAULTS: dict[str, Any] = {
     "threshold_overall": 0.0,
     "keyword_threshold": 0.75,
     "keyword_tolerance": 0.10,
+    # 相似关键词合并：两条关键词的字符/短语相似度达到这个值就视作同一个概念，
+    # 避免“抽象 / 抽象话 / 抽象人”把同一个方向重复加权。
+    "keyword_merge_threshold": 0.6,
     "llm_rerank": True,
     "llm_candidates": 3,
     "max_targets": 0,
@@ -80,6 +89,26 @@ class Settings:
     @property
     def text_min_chars(self) -> int:
         return int(self.get("text_min_chars"))
+
+    @property
+    def loose_detect(self) -> bool:
+        return bool(self.get("loose_detect", True))
+
+    @property
+    def soft_text_min_chars(self) -> int:
+        return max(1, int(self.get("soft_text_min_chars")))
+
+    @property
+    def detect_links(self) -> bool:
+        return bool(self.get("detect_links", True))
+
+    @property
+    def detect_media(self) -> bool:
+        return bool(self.get("detect_media", True))
+
+    @property
+    def keyword_merge_threshold(self) -> float:
+        return min(1.0, max(0.0, float(self.get("keyword_merge_threshold"))))
 
     @property
     def forward_min_nodes(self) -> int:

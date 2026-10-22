@@ -37,6 +37,7 @@ DEFAULT_SHIT_PROMPT = """请判断下面这坨群聊内容是不是“屎”（�
 
 来源群：{group_name}
 载体：{kind}
+粗筛触发：{trigger}
 内容：
 ---
 {content}
@@ -138,6 +139,7 @@ class Analyzer:
         merged = dict(values)
         merged.setdefault("group_name", "")
         merged.setdefault("kind", "")
+        merged.setdefault("trigger", "")
         merged.setdefault("content", "")
         merged.setdefault("BILI_BLOCK", "")
         merged.setdefault("CONTEXT_BLOCK", "")
@@ -192,6 +194,7 @@ class Analyzer:
         prompts = {
             "group_name": group_name or "未知群",
             "kind": kind,
+            "trigger": suspicion.reason or "unknown",
             "content": content,
             "BILI_BLOCK": bili_block,
             "CONTEXT_BLOCK": context,

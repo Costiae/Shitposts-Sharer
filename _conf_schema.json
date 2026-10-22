@@ -29,6 +29,30 @@
     "hint": "至少有这么多字的纯文本才会被送去判屎。合并转发、图片、B站分享不受此限制。",
     "default": 60
   },
+  "loose_detect": {
+    "description": "松闸门（推荐开启）",
+    "type": "bool",
+    "hint": "开启后，中等长度的文本和带梗的短句也会送审。粗筛只负责不漏，真正的判断仍由 LLM 完成；关掉会明显减少模型调用，但也会漏掉短小精悍的抽象现场。",
+    "default": true
+  },
+  "soft_text_min_chars": {
+    "description": "松闸门的文本阈值（字）",
+    "type": "int",
+    "hint": "达到这个字数（但没到上面的长文本阈值）也送审。默认 24。",
+    "default": 24
+  },
+  "detect_links": {
+    "description": "识别普通链接分享",
+    "type": "bool",
+    "hint": "任何 http(s) 链接都送审（B站链接无论如何都会识别）。",
+    "default": true
+  },
+  "detect_media": {
+    "description": "识别语音/视频/文件",
+    "type": "bool",
+    "hint": "语音、视频、文件消息也送审，避免漏掉以媒体形式出现的抽象内容。",
+    "default": true
+  },
   "forward_min_nodes": {
     "description": "合并转发最少条数",
     "type": "int",
@@ -84,7 +108,7 @@
   "shit_prompt": {
     "description": "判屎提示词（留空用内置）",
     "type": "text",
-    "hint": "可用占位符：{group_name} {kind} {content} {BILI_BLOCK} {CONTEXT_BLOCK} {anchors}。{anchors} 会展开成内置的 intensity 打分锚点。必须要求模型输出 JSON。",
+    "hint": "可用占位符：{group_name} {kind} {trigger} {content} {BILI_BLOCK} {CONTEXT_BLOCK} {anchors}。{trigger} 是粗筛命中原因（例如“玩梗短句(逆天)”）。{anchors} 会展开成内置的 intensity 打分锚点。必须要求模型输出 JSON。",
     "default": ""
   },
   "context_prompt": {
@@ -140,6 +164,12 @@
     "type": "float",
     "hint": "在阈值下方这个范围内仍算勉强及格，越接近阈值分数越高。中文短会话语料的余弦一般偏低，建议 0.10 左右。",
     "default": 0.10
+  },
+  "keyword_merge_threshold": {
+    "description": "相似关键词合并阈值",
+    "type": "float",
+    "hint": "两条关键词的字符相似度达到这个值就视作同一个概念（例如 抽象 / 抽象话 / 抽象人 合并为 抽象），避免同一个方向被重复加权。越低合并越激进。",
+    "default": 0.6
   },
   "llm_rerank": {
     "description": "用 LLM 复核候选群",

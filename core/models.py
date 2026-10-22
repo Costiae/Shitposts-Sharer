@@ -196,6 +196,9 @@ class GroupProfile:
     intake: dict[str, float] = field(default_factory=dict)
     threshold: float = 0.0  # 单群覆盖阈值，0 表示用全局
     enabled: bool = True
+    # 口味偏移度的平滑值（0~1）：越大说明这个群最近的口味跳得越厉害。
+    # 由 profile.update_intake 维护，参与可信度的“稳定度”因子。
+    drift: float = 0.0
     native_message_count: int = 0
     native_char_count: int = 0
     accepted_count: int = 0
@@ -206,13 +209,24 @@ class GroupProfile:
 
     # ---- 可信度 ----
     def confidence(self, k: float = 10.0) -> float:
-        """样本不足的可信度惩罚：n/(n+k)。
+        """可信度：与 ``profile.confidence_score`` 完全同一套公式。
 
-        样本量为 0 时可信度为 0（完全不可信），样本很多时趋于 1。
-        惩罚得很温和，因为它只是防武断，不是精度核心。
+        这里必须和指令层展示、路由层判定共用同一个实现，否则会出现
+        “/shit status 说够格、实际却不搬”这种自相矛盾。
+
+        延迟 import 是为了避免 models ↔ profile 的循环依赖：profile 在
+        模块顶层 import models，而本方法只在真正计算时才需要它。
         """
-        n = max(0, self.native_message_count)
-        return n / (n + max(k, 1e-6))
+        from .profile import confidence_score
+
+        return confidence_score(
+            native_messages=self.native_message_count,
+            native_chars=self.native_char_count,
+            drift=self.drift,
+            accepted=self.accepted_count,
+            rejected=self.rejected_count,
+            k=k,
+        )
 
 
 @dataclass(slots=True)

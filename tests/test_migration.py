@@ -128,5 +128,65 @@ class TestDirectionMigration(unittest.TestCase):
             storage.close()
 
 
+class TestDriftColumnMigration(unittest.TestCase):
+    """老库的 groups 表没有 drift 列，加载时必须自动 ALTER 补上。"""
+
+    def setUp(self):
+        self.db = scratch_path("migrate-drift")
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(self.db) + suffix).unlink(missing_ok=True)
+
+    def tearDown(self):
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(self.db) + suffix).unlink(missing_ok=True)
+
+    def _seed_v1_schema(self):
+        conn = sqlite3.connect(self.db)
+        conn.executescript(
+            """
+            CREATE TABLE groups (
+                group_key            TEXT PRIMARY KEY,
+                name                 TEXT NOT NULL DEFAULT '',
+                direction            TEXT NOT NULL DEFAULT 'both',
+                intake_json          TEXT NOT NULL DEFAULT '{}',
+                threshold            REAL NOT NULL DEFAULT 0,
+                enabled              INTEGER NOT NULL DEFAULT 1,
+                native_message_count INTEGER NOT NULL DEFAULT 0,
+                native_char_count    INTEGER NOT NULL DEFAULT 0,
+                accepted_count       INTEGER NOT NULL DEFAULT 0,
+                rejected_count       INTEGER NOT NULL DEFAULT 0,
+                last_shit_at         REAL NOT NULL DEFAULT 0,
+                created_at           REAL NOT NULL DEFAULT 0,
+                updated_at           REAL NOT NULL DEFAULT 0
+            );
+            INSERT INTO groups(group_key, name, direction)
+            VALUES('legacy', 'legacy', 'receive');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def test_legacy_table_gets_drift_column(self):
+        self._seed_v1_schema()
+        storage = Storage(self.db)
+        try:
+            group = storage.get_group("legacy")
+            self.assertIsNotNone(group)
+            self.assertEqual(group.drift, 0.0)
+            self.assertEqual(storage.read_setting("schema_version"), "2")
+        finally:
+            storage.close()
+
+    def test_migration_is_idempotent(self):
+        self._seed_v1_schema()
+        for _ in range(3):
+            Storage(self.db).close()
+        storage = Storage(self.db)
+        try:
+            self.assertEqual(storage.get_group("legacy").drift, 0.0)
+        finally:
+            storage.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -25,13 +25,18 @@ AstrBot 扩展：监听已注册群的全部消息，识别"潜在的屎"（合�
 
 粗筛很松，真正的判断交给多模态 LLM：
 
-- **合并转发**（聊天记录）
+- **合并转发**（聊天记录，按 `forward_min_nodes` 过滤过短的）
 - **图片**（连同配文一起送给视觉模型）
+- **语音 / 视频 / 文件**
 - **B 站分享**（BV 号 / b23 短链 / QQ 小程序卡片，另附视频标题、UP 主、时长、播放量）
+- **普通链接分享**（`detect_links`，默认开）
 - **够长的纯文本**（默认 ≥ 60 字）
-- 其余短句只进上下文，不送审
+- **松闸门**（`loose_detect`，默认开）：
+  - 中等长度文本（默认 ≥ 24 字）
+  - 带梗的短句（`哈哈哈哈哈` / `草` / `逆天` / `绷不住` / `笑死` …）
 
 "是不是屎"没有硬编码标准，全部由提示词决定，可以在 WebUI 里改。
+粗筛只负责**不漏**：越靠后的规则越松，模型有最终否决权。
 
 ### 2. 上下文关系
 
@@ -68,6 +73,10 @@ AstrBot 扩展：监听已注册群的全部消息，识别"潜在的屎"（合�
 采纳率     = 采纳 / (采纳 + 拒绝)
 ```
 
+偏移度会做指数平滑后存进群档案（`drift`），因此**路由判定、`/shit status`、
+`/shit debug` 用的是同一个 `GroupProfile.confidence()`**，不会出现
+“状态说够格、实际却不搬”的矛盾。老库在加载时自动补 `drift` 列。
+
 "可信度"只是**防样本过少而武断搬屎**的温和惩罚，不是精度核心。
 
 ### 4. 匹配与搬运
@@ -75,6 +84,8 @@ AstrBot 扩展：监听已注册群的全部消息，识别"潜在的屎"（合�
 两种匹配来源**都实现了**，由配置开关组合：
 
 - **关键词向量**（默认开，零成本）：余弦相似度过阈值即合格，阈值下方留容差带
+- **相似关键词合并**：`抽象 / 抽象话 / 抽象人` 这类同一概念的写法只计一次权，
+  避免一个方向被重复累加（阈值 `keyword_merge_threshold`，默认 0.6）
 - **LLM 复核**（默认开）：关键词粗筛出前 N 个群，把候选清单注入提示词让模型打分
 
 门槛：`口味匹配分` 与 `群可信度` 分别过各自阈值 → 全部搬运（可设 `max_targets` 限流）。
@@ -143,11 +154,16 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 | `judge_timeout_sec` | 180 | 单条判定超时，防止一条卡死拖垮收盘循环 |
 | `enabled` | true | 总开关 |
 | `watch_only_registered` | true | 只处理已注册群 |
+| `text_min_chars` | 60 | 长文本触发阈值 |
+| `loose_detect` | true | 松闸门：中等文本 + 带梗短句也送审 |
+| `soft_text_min_chars` | 24 | 松闸门的文本阈值 |
+| `detect_links` / `detect_media` | true | 普通链接、语音/视频/文件是否送审 |
 | `expand_forward` | true | 自动调 `get_forward_msg` 展开合并转发 |
 | `shit_min_intensity` | 0.45 | 离谱分低于此值不搬 |
 | `window_seconds` | 90 | 上下文聚合窗口 |
 | `confidence_k` | 10 | 可信度下限参数 |
 | `keyword_threshold` / `keyword_tolerance` | 0.75 / 0.10 | 关键词匹配的阈值与容差带 |
+| `keyword_merge_threshold` | 0.6 | 相似关键词合并阈值 |
 | `llm_rerank` | true | 用 LLM 复核候选群 |
 | `with_context` | true | 搬运时附带群友讨论 |
 | `anon_source` | true | 不显示屎来自哪个群 |
@@ -171,7 +187,7 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 典型输出：
 
 ```
-[shit] detect | SKIP not suspicious need=60chars got=1 kinds=['plain']
+[shit] detect | SKIP not suspicious need=60chars soft=24 got=1 kinds=['plain']
 [shit] judge  | SKIP intensity 0.20 < min 0.45 (reason='不够劲')
 [shit] judge  | SKIP model says NOT shit (intensity=0.10 reason='日常闲聊')
 [shit] route  | SKIP no candidate group passed the keyword+confidence gate

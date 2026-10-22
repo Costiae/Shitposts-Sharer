@@ -24,18 +24,40 @@ _FORWARD_HINT = ("合并", "聊天记录", "转发")
 
 _IMAGE_SCHEMES = ("http://", "https://", "file://")
 
+# 链接分享：只认真正的 http(s) URL，避免把 "http" 这种词误判成链接
+_LINK_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
+# “玩梗短句”标记：这些词单独出现不值得判定，但配合短句往往是抽象现场。
+# 只作为粗筛入口，真正的判断仍然交给 LLM，所以宁可松一点。
+_LOOSE_MARKER_RE = re.compile(
+    r"(哈{3,}|草{2,}|6{3,}|笑死|绷不住|绷|逆天|离谱|抽象|裂开|典中典|急了|乐死|卧槽)"
+)
+
+# 媒体类载体：语音 / 视频 / 文件本身就是“值得看一眼”的内容
+_MEDIA_KINDS = ("record", "video", "file")
+
 
 def _component_type(comp: Any) -> str:
-    """组件类型名。
+    """组件类型名，统一成小写字符串。
 
-    AstrBot 的组件用 ``type`` 属性（Plain / Image / Forward ...），但测试或
-    其他平台对象可能没有，退回到类名。注意 ``Segment`` 自身没有 ``type``，
-    直接 getattr 会得到 "segment" 这种无意义的类型名。
+    AstrBot 4.x 的 ``ComponentType`` 是 Enum：在非 StrEnum 的版本里，
+    ``str(ComponentType.Plain)`` 是 ``"ComponentType.Plain"``，直接 lower
+    会得到 ``"componenttype.plain"``，于是下面所有分支都匹配不上 ——
+    图片、转发、卡片会全部退化成 unknown，表现为“识别不出任何东西”。
+
+    所以必须优先取枚举的 ``.value``；同时兼容已经是字符串的旧对象，
+    以及某些版本把类型名写成 ``"ComponentType.Plain"`` 的形式。
     """
     raw = getattr(comp, "type", None)
     if raw is None:
         raw = comp.__class__.__name__
-    return str(raw).lower()
+
+    value = getattr(raw, "value", raw)
+    name = str(value)
+    lowered = name.lower()
+    if "." in name and lowered.startswith("componenttype."):
+        name = name.rsplit(".", 1)[-1]
+    return name.lower()
 
 
 def segment_from_component(comp: Any, depth: int = 0) -> Segment | None:
@@ -184,18 +206,36 @@ async def expand_forward(message: Message, context: Any) -> Message:
 
 
 def is_there_a_shit(message: Message, settings: Settings) -> tuple[bool, str]:
-    """粗筛：返回 (是否送审, 原因)。规则刻意宽松。"""
+    """粗筛：返回 (是否送审, 原因)。规则刻意宽松。
+
+    判定顺序就是“证据强度”顺序：明确载体（转发/图片/媒体/卡片）→ 平台分享
+    （B站/链接）→ 文本长度 → 玩梗信号。越靠前的规则越不需要模型兜底，
+    所以原因字符串里会带上具体证据（几张图、几条转发、命中哪个梗），
+    方便在 ``[shit] detect`` 日志里直接看出为什么被俘获。
+    """
     if not settings.get("enabled"):
         return False, "插件已关闭"
 
     kinds = message.kinds()
     text = message.text()
+    chars = message.char_count()
 
     if "forward" in kinds:
-        return True, "合并转发"
+        nodes = sum(len(seg.children) for seg in message.segments if seg.kind == "forward")
+        need = settings.forward_min_nodes
+        if nodes and nodes < need:
+            return False, f"转发只有 {nodes} 条 < {need}"
+        detail = f"{nodes}条" if nodes else "空壳"
+        return True, f"合并转发({detail})"
 
     if "image" in kinds:
-        return True, "图片"
+        images = sum(1 for seg in message.segments if seg.kind == "image")
+        return True, f"图片({images}张)"
+
+    if settings.detect_media:
+        media = [kind for kind in kinds if kind in _MEDIA_KINDS]
+        if media:
+            return True, "媒体(" + "/".join(sorted(media)) + ")"
 
     bili = extract_bili_ids(text)
     if bili.bvids or bili.short_urls or bili.shares:
@@ -205,8 +245,24 @@ def is_there_a_shit(message: Message, settings: Settings) -> tuple[bool, str]:
         # 卡片消息（分享）多半带链接，交给 LLM 看
         return True, "卡片分享"
 
-    if message.char_count() >= settings.text_min_chars:
-        return True, "长文本"
+    if settings.detect_links and _LINK_RE.search(text):
+        return True, "链接分享"
+
+    if chars >= settings.text_min_chars:
+        return True, f"长文本({chars}字)"
+
+    if not settings.loose_detect:
+        return False, ""
+
+    # ---- 松闸门：宁可多送一次模型，也别漏掉真正的抽象现场 ----
+    # 1) 中等长度的文本：常常是“一段没头没尾的抽象故事”
+    if chars >= settings.soft_text_min_chars:
+        return True, f"中等文本({chars}字)"
+
+    # 2) 短句里的梗信号：哈哈哈哈哈 / 草 / 逆天 / 绷不住 ...
+    marker = _LOOSE_MARKER_RE.search(text)
+    if marker:
+        return True, f"玩梗短句({marker.group(0)})"
 
     return False, ""
 

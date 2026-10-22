@@ -39,6 +39,14 @@ def update_intake(
     addend = {key: value * weight for key, value in shit.vector.items()}
     group.intake = blend_into(before, addend, momentum=0.92 if is_native else 0.97)
 
+    # 偏移度做指数平滑：单次跳题只让稳定度轻微下降，连续跳题才会明显掉。
+    # 第一次样本（before 为空）本来就没有参照，drift 恒为 0，不予惩罚。
+    if drift > 0 or group.drift > 0:
+        momentum = 0.7 if is_native else 0.8
+        group.drift = max(
+            0.0, min(1.0, momentum * group.drift + (1.0 - momentum) * drift)
+        )
+
     if is_native:
         group.native_message_count += 1
         group.native_char_count += max(1, len(shit.text_blob))

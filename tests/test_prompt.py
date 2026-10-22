@@ -84,6 +84,14 @@ class TestAnchorsPresent(unittest.TestCase):
         self.assertIn("0.9-1.0", prompt)
         self.assertNotIn("{anchors}", prompt)  # 没被替换就是 format 漏了
 
+    def test_judge_prompt_contains_trigger_reason(self):
+        context = RecordingContext()
+        analyzer = Analyzer(Settings(dict(DEFAULTS)), LLMClient(context))
+        asyncio.run(analyzer.judge(make_suspicion(), "测试群"))
+
+        self.assertIn("粗筛触发：测试", context.prompts[0])
+        self.assertNotIn("{trigger}", context.prompts[0])
+
     def test_relate_prompt_contains_rendered_anchors(self):
         context = RecordingContext()
         analyzer = Analyzer(Settings(dict(DEFAULTS)), LLMClient(context))

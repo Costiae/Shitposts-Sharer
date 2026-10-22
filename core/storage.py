@@ -18,7 +18,7 @@ from typing import Any, Iterable
 
 from .models import Direction, GroupProfile, ShitRecord
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS groups (
@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS groups (
     intake_json          TEXT NOT NULL DEFAULT '{}',
     threshold            REAL NOT NULL DEFAULT 0,
     enabled              INTEGER NOT NULL DEFAULT 1,
+    drift                REAL NOT NULL DEFAULT 0,
     native_message_count INTEGER NOT NULL DEFAULT 0,
     native_char_count    INTEGER NOT NULL DEFAULT 0,
     accepted_count       INTEGER NOT NULL DEFAULT 0,
@@ -111,10 +112,31 @@ class Storage:
             self._conn.close()
 
     def _migrate(self) -> None:
-        row = self.read_setting("schema_version", "")
-        if row == "":
-            self.write_setting("schema_version", str(SCHEMA_VERSION))
+        self._migrate_group_columns()
         self._migrate_direction_values()
+        try:
+            version = int(self.read_setting("schema_version", "0") or 0)
+        except ValueError:
+            version = 0
+        if version < SCHEMA_VERSION:
+            self.write_setting("schema_version", str(SCHEMA_VERSION))
+
+    def _migrate_group_columns(self) -> None:
+        """给老库补列。
+
+        ``CREATE TABLE IF NOT EXISTS`` 不会给已存在的表加字段，所以新增列
+        必须显式 ALTER。当前只有 ``drift``（口味偏移度），老库默认 0 即可
+        无感升级。
+        """
+        columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(groups)").fetchall()
+        }
+        if "drift" not in columns:
+            self._conn.execute(
+                "ALTER TABLE groups ADD COLUMN drift REAL NOT NULL DEFAULT 0"
+            )
+            self._conn.commit()
 
     def _migrate_direction_values(self) -> None:
         """in/out -> receive/emit。
@@ -157,6 +179,7 @@ class Storage:
             intake=json.loads(row["intake_json"] or "{}"),
             threshold=float(row["threshold"]),
             enabled=bool(row["enabled"]),
+            drift=float(row["drift"]),
             native_message_count=int(row["native_message_count"]),
             native_char_count=int(row["native_char_count"]),
             accepted_count=int(row["accepted_count"]),
@@ -194,15 +217,16 @@ class Storage:
             """
             INSERT INTO groups (
                 group_key, name, direction, intake_json, threshold, enabled,
-                native_message_count, native_char_count, accepted_count,
+                drift, native_message_count, native_char_count, accepted_count,
                 rejected_count, last_shit_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(group_key) DO UPDATE SET
                 name = excluded.name,
                 direction = excluded.direction,
                 intake_json = excluded.intake_json,
                 threshold = excluded.threshold,
                 enabled = excluded.enabled,
+                drift = excluded.drift,
                 native_message_count = excluded.native_message_count,
                 native_char_count = excluded.native_char_count,
                 accepted_count = excluded.accepted_count,
@@ -217,6 +241,7 @@ class Storage:
                 json.dumps(profile.intake, ensure_ascii=False),
                 profile.threshold,
                 int(profile.enabled),
+                profile.drift,
                 profile.native_message_count,
                 profile.native_char_count,
                 profile.accepted_count,
