@@ -139,9 +139,11 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
+| `log_level` | normal | `off` / `normal` / `full`，见下节 |
 | `enabled` | true | 总开关 |
 | `watch_only_registered` | true | 只处理已注册群 |
-| `shit_min_intensity` | 0.6 | 离谱分低于此值不搬 |
+| `expand_forward` | true | 自动调 `get_forward_msg` 展开合并转发 |
+| `shit_min_intensity` | 0.45 | 离谱分低于此值不搬 |
 | `window_seconds` | 90 | 上下文聚合窗口 |
 | `confidence_k` | 10 | 可信度下限参数 |
 | `keyword_threshold` / `keyword_tolerance` | 0.75 / 0.10 | 关键词匹配的阈值与容差带 |
@@ -150,6 +152,33 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 | `anon_source` | true | 不显示屎来自哪个群 |
 | `dry_run` | false | 演练模式：只判定记录，不真发 |
 | `shit_prompt` / `context_prompt` / `group_prompt` / `extra_prompt` | 空 | 自定义提示词 |
+
+## 日志
+
+所有日志前缀 `[shit]`，格式 `[shit] <阶段> | <内容>`，方便 `grep '\[shit\]'`。
+
+| 级别 | 输出内容 |
+| --- | --- |
+| `off` | 只写最终搬运结果 |
+| `normal`（默认） | 每条消息**是否被俘获**，没被俘获的说明**卡在哪道闸门** |
+| `full` | 上面全部 + 解码后的分段、转发展开情况、模型输入摘要、模型原始判定、关键词、候选群打分、逐群投递结果、完整 trail |
+
+阶段依次为 `entry`（AstrBot 交给插件）→ `group`（群是否注册/启用）→
+`decode`（消息解析与转发展开）→ `detect`（是否可疑）→ `judge`（LLM 判定）→
+`route`（选目标群）→ `result`。
+
+典型输出：
+
+```
+[shit] detect | SKIP not suspicious need=60chars got=1 kinds=['plain']
+[shit] judge  | SKIP intensity 0.20 < min 0.45 (reason='不够劲')
+[shit] judge  | SKIP model says NOT shit (intensity=0.10 reason='日常闲聊')
+[shit] route  | SKIP no candidate group passed the keyword+confidence gate
+[shit] route  | DELIVERED to aiocqhttp:GroupMessage:200002 (score=0.80 confidence=0.86)
+```
+
+**关键**：如果群里发了消息，但日志里连 `[shit] entry` 都没有，说明消息在到
+插件之前就被 AstrBot 拦掉了（未唤醒 / 白名单 / 平台没上报）—— 这不是插件的问题。
 
 ## 依赖
 

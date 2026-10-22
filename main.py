@@ -18,8 +18,10 @@ from astrbot.api.star import Context, Star, register  # type: ignore[import-not-
 
 from .core.commands import Commands, CommandResult, is_group_event
 from .core.config import Settings
+from .core.detector import message_from_event
 from .core.pipeline import Loggerish, Pipeline
 from .core.storage import Storage
+from .core.tracelog import Trace, describe_message
 
 # 插件指令一律 ASCII；alias 只作为历史中文指令的兼容入口
 COMMAND = "shit"
@@ -67,13 +69,35 @@ class ShitpostsSharer(Star):
     # ------------------------------------------------------------------ 监听
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_any_message(self, event: AstrMessageEvent):
-        """所有消息都过一遍：已注册群才处理。"""
+        """所有消息都过一遍。
+
+        EARLY 日志是整条链路的第一层：它证明 AstrBot 确实把消息交给了插件。
+        如果群里发了消息但这里**没有**对应日志，说明消息在到插件之前就被
+        AstrBot 拦掉了（未唤醒 / 白名单 / 平台没上报），那就不是插件的问题。
+        """
+        early = Trace(Loggerish(logger), str(self.settings.get("log_level") or "normal"))
+        early.gate("entry")
+
         if not is_group_event(event):
+            early.skip("not a group message")
             return
+
+        message = message_from_event(
+            event, str(getattr(event, "unified_msg_origin", "") or "")
+        )
+        early.step(
+            f"EARLY {describe_message(message, limit=200)} "
+            f"wake={getattr(event, 'is_wake', '?')} "
+            f"at_or_wake={getattr(event, 'is_at_or_wake_command', '?')}"
+        )
+
         try:
             await self.pipeline.on_event(event)
-        except Exception as exc:  # pragma: no cover
-            logger.error(f"搬屎监听出错：{type(exc).__name__}: {exc}")
+        except Exception as exc:  # pragma: no cover - 绝不让异常冒到框架
+            early.error(f"listener crashed: {type(exc).__name__}: {exc}")
+            logger.error(
+                f"[shit] entry | listener crashed: {type(exc).__name__}: {exc}"
+            )
 
     # ------------------------------------------------------------------ 指令
     #

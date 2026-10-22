@@ -26,7 +26,15 @@ _IMAGE_SCHEMES = ("http://", "https://", "file://")
 
 
 def _component_type(comp: Any) -> str:
-    raw = getattr(comp, "type", None) or comp.__class__.__name__
+    """组件类型名。
+
+    AstrBot 的组件用 ``type`` 属性（Plain / Image / Forward ...），但测试或
+    其他平台对象可能没有，退回到类名。注意 ``Segment`` 自身没有 ``type``，
+    直接 getattr 会得到 "segment" 这种无意义的类型名。
+    """
+    raw = getattr(comp, "type", None)
+    if raw is None:
+        raw = comp.__class__.__name__
     return str(raw).lower()
 
 

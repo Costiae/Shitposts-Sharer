@@ -1,4 +1,10 @@
 {
+  "log_level": {
+    "description": "日志详细程度",
+    "type": "string",
+    "hint": "off = 只写搬运结果；normal = 每条消息是否被俘获及被哪道闸门挡下（推荐）；full = 每一层每一步，含模型输入摘要、原始输出、关键词、候选群打分。所有日志前缀 [shit]，便于 grep。",
+    "default": "normal"
+  },
   "enabled": {
     "description": "启用搬屎",
     "type": "bool",

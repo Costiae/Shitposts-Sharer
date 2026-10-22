@@ -16,6 +16,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Any
 
 from .config import Settings
 from .models import ContextMessage, Message
@@ -31,6 +32,9 @@ class Suspicion:
     context_before: list[ContextMessage] = field(default_factory=list)
     extra_messages: list[Message] = field(default_factory=list)
     closed: bool = False
+    # 判定发生在另一个时刻（窗口收盘），所以要带着追踪上下文过去，
+    # 否则入口那条日志和判定那条日志无法关联。
+    trace: Any = None
 
     def all_messages(self) -> list[Message]:
         return [self.message, *self.extra_messages]
@@ -77,7 +81,7 @@ class ContextAccumulator:
                 if len(suspicion.extra_messages) >= self.settings.max_messages_per_shit:
                     suspicion.closed = True
 
-    def open(self, message: Message, reason: str) -> Suspicion:
+    def open(self, message: Message, reason: str, *, trace: Any = None) -> Suspicion:
         """命中候选，开一个现场，并把之前的若干条消息当“前文”带上。"""
         history = list(self._history.get(message.group_key, []))
         # 去掉当前这条本身（它已经在 observe 里进 history 了）
@@ -89,6 +93,7 @@ class ContextAccumulator:
             message=message,
             reason=reason,
             context_before=[item for item in before],
+            trace=trace,
         )
         self._open[message.group_key] = suspicion
         return suspicion

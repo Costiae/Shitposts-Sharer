@@ -36,6 +36,7 @@ from .profile import confidence_score, describe_intake, update_intake
 from .router import Router, fingerprint_of
 from .sender import build_chain, send_to_group
 from .storage import Storage
+from .tracelog import Trace, describe_message, describe_segments
 from .vector import build_vector, tokenize
 
 
@@ -68,6 +69,9 @@ class Loggerish:
     """尽量用 AstrBot 的 logger，测试里就退化到 print。"""
 
     inner: Any = None
+
+    def debug(self, text: str) -> None:
+        self._log("debug", text)
 
     def info(self, text: str) -> None:
         self._log("info", text)
@@ -156,45 +160,70 @@ class Pipeline:
     # ------------------------------------------------------------------ 入口
     async def on_event(self, event: Any) -> None:
         """每条群消息都会进来。"""
+        trace = Trace(self.logger, str(self.settings.get("log_level") or "normal"))
+
         if not self.settings.get("enabled"):
+            trace.gate("global")
+            trace.skip("plugin disabled")
             return
 
         group_key = str(getattr(event, "unified_msg_origin", "") or "")
         if not group_key:
+            trace.gate("origin")
+            trace.skip("no unified_msg_origin")
             return
 
+        trace.gate("group")
         group = self.storage.get_group(group_key)
         if self.settings.watch_only_registered and group is None:
+            trace.skip(f"not registered ({group_key})")
             return
         if group is not None and not group.enabled:
-            return
-        if group is not None and not group.direction.can_emit:
-            # receive 群：它自己说的话不往外搬，但消息仍进上下文（作为语境）
-            message = message_from_event(event, group_key)
-            self.accumulator.observe(self._enrich(message))
+            trace.skip(f"group paused ({group_key})")
             return
 
-        self.stats.seen += 1
+        trace.gate("decode")
         message = message_from_event(event, group_key)
+        trace.step(f"decoded {describe_segments(message)}")
+
         if self.settings.get("expand_forward", True):
-            # AstrBot 的 Forward 只有 id，napcat 也没展开；这里补回来
+            before = sum(1 for seg in message.segments if seg.kind == "forward" and not seg.children)
             message = await expand_forward(message, self.context)
+            after = sum(1 for seg in message.segments if seg.kind == "forward" and not seg.children)
+            if before:
+                trace.step(f"forward expand: {before} hollow -> {after} hollow")
+                if after and not before - after:
+                    trace.step("forward expand FAILED (no nodes returned)")
+
         message = self._enrich(message)
         self.accumulator.observe(message, has_bili=bool(self._bili_refs(message.text())))
 
+        if group is not None and not group.direction.can_emit:
+            # receive 群：它自己说的话不往外搬，但消息仍进上下文（作为语境）
+            trace.skip(f"group is receive-only, message kept as context only")
+            return
+
+        self.stats.seen += 1
+        trace.gate("detect")
         interesting, reason = is_there_a_shit(message, self.settings)
         if not interesting:
+            trace.skip(
+                f"not suspicious need={self.settings.text_min_chars}chars "
+                f"got={message.char_count()} kinds={sorted(message.kinds())}"
+            )
             return
 
         now = time.time()
         last = self._cooldown.get(group_key, 0.0)
         cooldown = float(self.settings.get("trigger_cooldown_sec") or 0)
         if now - last < cooldown:
+            trace.skip(f"cooldown {now - last:.1f}s < {cooldown:.0f}s")
             return
         self._cooldown[group_key] = now
 
         self.stats.suspicious += 1
-        self.accumulator.open(message, reason)
+        trace.caught(f"{reason} | {describe_message(message)}")
+        self.accumulator.open(message, reason, trace=trace)
 
     def _bili_refs(self, text: str):
         return extract_bili_ids(text)
@@ -212,17 +241,31 @@ class Pipeline:
     async def handle_suspicion(self, suspicion: Suspicion) -> dict[str, Any] | None:
         group_key = suspicion.message.group_key
         group = self.storage.get_group(group_key)
+        trace = suspicion.trace or Trace(self.logger, str(self.settings.get("log_level") or "normal"))
+        trace.gate("judge")
+
         if group is None and self.settings.watch_only_registered:
+            trace.skip("not registered at judge time")
             return None
 
         self.stats.judged += 1
         message = suspicion.message
         text = self._enrich(message).text()
+        trace.step(f"window closed after {suspicion.age():.1f}s, "
+                   f"context={len(suspicion.context_before)} msgs, "
+                   f"extra={len(suspicion.extra_messages)}")
+
         bili_infos = []
         if self.settings.get("bili_info") and self._bili_refs(text).any():
             bili_infos = await self.bili.resolve(text)
+            trace.step(f"bili resolved {len(bili_infos)} item(s)")
 
         kind = message.kind_hint()
+        trace.step(f"prompt input: kind={kind} chars={len(text)} "
+                   f"images={sum(1 for s in message.segments if s.kind == 'image')}")
+        if trace.level == "full":
+            trace.step(f"prompt content: {describe_message(message, limit=600)}")
+
         verdict = await self.analyzer.judge(
             suspicion,
             group.name if group else group_key,
@@ -232,7 +275,10 @@ class Pipeline:
 
         if not verdict.ok:
             self.stats.last_error = "LLM 未返回可解析结果"
-            self.logger.warning(f"判屎失败（{group_key}）：模型输出无法解析")
+            trace.error(
+                f"judge FAILED: raw response unparseable "
+                f"(raw={str(verdict.raw)[:300]!r})"
+            )
             return None
 
         analysis = verdict.analysis
@@ -240,20 +286,31 @@ class Pipeline:
         # 留痕：判没判、判成啥、分数够不够，一眼可辨。
         # 没有这行时，“判成不是屎”和“分数被阈值挡掉”在日志里长得一模一样。
         min_intensity = float(self.settings.get("shit_min_intensity") or 0.0)
-        self.logger.info(
-            f"判定（{group_key}）is_shit={analysis.is_shit} "
-            f"intensity={analysis.intensity:.2f} "
-            f"min={min_intensity:.2f} reason={analysis.reason!r}"
+        trace.step(
+            f"model raw: is_shit={analysis.is_shit} intensity={analysis.intensity:.2f} "
+            f"tags={analysis.tags} keywords={analysis.keywords[:5]}"
         )
 
         if not analysis.is_shit:
+            trace.skip(
+                f"model says NOT shit (intensity={analysis.intensity:.2f} "
+                f"reason={analysis.reason!r})"
+            )
             return None
 
         if analysis.intensity < min_intensity:
             self.stats.rejected_intensity += 1
+            trace.skip(
+                f"intensity {analysis.intensity:.2f} < min {min_intensity:.2f} "
+                f"(reason={analysis.reason!r})"
+            )
             return None
 
         self.stats.accepted += 1
+        trace.caught(
+            f"is_shit=true intensity={analysis.intensity:.2f} "
+            f"reason={analysis.reason!r}"
+        )
 
         keywords = list(dict.fromkeys([*analysis.keywords, *analysis.context_keywords]))
         blob = normalize_text(
@@ -293,8 +350,9 @@ class Pipeline:
         existing = self.storage.find_by_fingerprint(record.fingerprint)
         if existing is not None:
             record.incoming = True
-            self.logger.info(
-                f"重复屎，跳过搬运（首次来自 {existing.source_group}，本次来自 {group_key}）"
+            trace.skip(
+                f"duplicate (first seen in {existing.source_group}, "
+                f"fingerprint={record.fingerprint[:12]})"
             )
             if group is not None:
                 self.storage.upsert_group(group)
@@ -308,11 +366,20 @@ class Pipeline:
             update_intake(group, record, self.settings, is_native=not record.incoming)
             self.storage.upsert_group(group)
 
+        trace.gate("route")
         plan = self.router.keyword_plan(
             record,
             self.storage.list_groups(Direction.RECEIVE),
             exclude={group_key},
         )
+        trace.step(
+            f"keyword candidates={len(plan.candidates)} rejected={len(plan.rejected)}"
+        )
+        for key, why in plan.rejected[:10]:
+            trace.step(f"  rejected {key}: {why}")
+
+        if not plan.candidates:
+            trace.skip("no candidate group passed the keyword+confidence gate")
 
         # 第二层：LLM 复核候选群（开关由 analysis_provider_id / 提示词控制）
         if plan.candidates and self.settings.get("llm_rerank", True) and self.llm.available:
@@ -328,11 +395,15 @@ class Pipeline:
             )
             if scores:
                 plan = self.router.apply_llm_scores(plan, scores, list(groups.values()))
+                trace.step(f"llm rerank scores: {scores}")
+            else:
+                trace.step("llm rerank returned nothing, keeping keyword order")
 
         delivered = []
         for candidate in plan.candidates:
             target = self.storage.get_group(candidate.group_key)
-            if not self.router.can_receive(target) or target is None:
+            if target is None or not self.router.can_receive(target):
+                trace.step(f"skip {candidate.group_key}: not receivable")
                 continue
             if not self.storage.record_delivery(
                 record.shit_id,
@@ -342,14 +413,19 @@ class Pipeline:
                 candidate.source,
                 "pending",
             ):
+                trace.step(f"skip {target.group_key}: already delivered")
                 continue  # 已经搬过
 
             if self.settings.get("dry_run"):
                 self.storage.mark_delivery(record.shit_id, target.group_key, "dry_run")
                 delivered.append(target.group_key)
+                trace.result(
+                    f"DRY RUN would deliver to {target.group_key} "
+                    f"(score={candidate.score:.2f} confidence={candidate.confidence:.2f})"
+                )
                 continue
 
-            ok = await self._deliver(record, target, group)
+            ok = await self._deliver(record, target, group, trace=trace)
             self.storage.mark_delivery(
                 record.shit_id, target.group_key, "ok" if ok else "fail"
             )
@@ -358,13 +434,22 @@ class Pipeline:
                 delivered.append(target.group_key)
                 target.accepted_count += 1
                 self.storage.upsert_group(target)
+                trace.result(
+                    f"DELIVERED to {target.group_key} "
+                    f"(score={candidate.score:.2f} confidence={candidate.confidence:.2f})"
+                )
             else:
                 self.stats.failed += 1
+                trace.warn(f"delivery to {target.group_key} FAILED")
 
-        self.logger.info(
-            f"屎 {record.shit_id[:8]} 来自 {group_key}: "
-            f"关键词 {keywords[:5]} → 目标 {delivered or '无'}"
+        trace.gate("result")
+        trace.result(
+            f"shit={record.shit_id[:8]} from={group_key} "
+            f"intensity={analysis.intensity:.2f} keywords={keywords[:5]} "
+            f"delivered={delivered or 'none'}"
         )
+        if trace.level == "full":
+            trace.step(f"trail: {trace.summary()}")
         return {
             "shit_id": record.shit_id,
             "keywords": keywords,
@@ -386,6 +471,8 @@ class Pipeline:
         record: ShitRecord,
         target: GroupProfile,
         source_group: GroupProfile | None,
+        *,
+        trace: Trace | None = None,
     ) -> bool:
         chain = build_chain(
             record,
@@ -397,10 +484,17 @@ class Pipeline:
             ),
             with_context=bool(self.settings.get("with_context", True)),
         )
+        if trace is not None and trace.level == "full":
+            trace.step(f"built chain with {len(chain)} component(s)")
         result = await send_to_group(self.context, target.group_key, chain)
         if not result.ok:
             self.stats.last_error = result.detail
-            self.logger.warning(f"搬运到 {target.group_key} 失败：{result.detail}")
+            if trace is not None:
+                trace.warn(f"send to {target.group_key} failed: {result.detail}")
+            else:
+                self.logger.warning(
+                    f"[shit] deliver | failed to {target.group_key}: {result.detail}"
+                )
         return result.ok
 
     # ------------------------------------------------------------------ 调试

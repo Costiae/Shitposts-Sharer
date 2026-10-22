@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from typing import Any
 
 DEFAULTS: dict[str, Any] = {
+    # ---- 日志 ----
+    # off    = 只写搬运结果
+    # normal = 每条可疑消息的结论 + 被挡原因（默认）
+    # full   = 每一层每一步，含模型输入摘要与原始输出
+    "log_level": "normal",
     # ---- 触发 ----
     "enabled": True,
     "watch_only_registered": True,
