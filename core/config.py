@@ -24,7 +24,9 @@ DEFAULTS: dict[str, Any] = {
     "window_seconds": 90,
     "max_messages_per_shit": 20,
     # ---- 判断 ----
-    "shit_min_intensity": 0.6,
+    # 0.5 = “明显抽象，值得跨群分享”的锚点下沿。原来的 0.6 在模型给保守分时
+    # 会挡掉大量本该搬走的内容；配合提示词里的锚点，0.45 足够稳。
+    "shit_min_intensity": 0.45,
     "shit_prompt": "",
     "context_prompt": "",
     "group_prompt": "",

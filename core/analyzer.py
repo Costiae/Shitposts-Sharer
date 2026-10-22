@@ -20,8 +20,18 @@ SYSTEM = (
     "你是一个群聊搬运工的鉴屎员。你的任务是从一坨群聊内容里判断它是否是"
     "值得跨群传播的“屎”——即离谱、抽象、猎奇、好笑、或强烈符合某个群口味的"
     "非日常内容；正常闲聊、日常问候、普通新闻、工作讨论不是屎。"
+    "打分时请参照给定的锚点，不要让分数集中在中低段——"
+    "如果内容确实值得搬，就大胆给高分。"
     "你必须只输出一个 JSON 对象，不要输出任何解释性文字。"
 )
+
+# 锚点很重要：只写“0.0 到 1.0 的离谱程度”时，模型没有校准参照，
+# 会把“有点意思”的东西打在 0.2~0.5，导致 intensity 永远压在阈值下面。
+INTENSITY_ANCHORS = """  0.0-0.2  完全正常，日常信息、问好、语气词
+  0.3-0.4  有点意思但很常见（普通玩梗、轻微吐槽）
+  0.5-0.6  明显抽象，值得跨群分享
+  0.7-0.8  非常离谱，适合主动搬运
+  0.9-1.0  逆天级，看到就想立刻转发"""
 
 DEFAULT_SHIT_PROMPT = """请判断下面这坨群聊内容是不是“屎”（是否值得跨群搬运）。
 
@@ -44,10 +54,17 @@ DEFAULT_SHIT_PROMPT = """请判断下面这坨群聊内容是不是“屎”（�
 注意：请同时判断上面候选内容与上下文之间有没有“话题关系”——
 也就是说，这段内容是被群友顺着什么话题引出来的，还是孤立地突然砸进来的。
 
+intensity 请按下面的锚点打分，不要给保守值：
+{anchors}
+
+注意：is_shit 与 intensity 是两个独立判断。
+is_shit=false 时 intensity 可以为 0；但只要你判了 is_shit=true，
+就说明它确实值得传播，此时 intensity 应当落在 0.5 以上。
+
 只输出 JSON：
 {{
   "is_shit": true/false,
-  "intensity": 0.0 到 1.0 的离谱程度,
+  "intensity": 0.0 到 1.0，按上面的锚点打分,
   "tags": ["离谱", "玩梗", ...] 最多 5 个,
   "keywords": ["最能代表这坨屎话题的 3-8 个关键词，中文短语优先"],
   "reason": "一句话理由，20 字以内",
@@ -69,7 +86,8 @@ DEFAULT_CONTEXT_PROMPT = """下面是群聊里的一段对话。请判断这些�
   "topics": ["如果有共同话题，列出 1-3 个"],
   "keywords": ["最能概括这段对话的 3-8 个关键词"],
   "summary": "一句话概括这段对话在聊什么",
-  "intensity": 0.0 到 1.0，整段对话有多“屎”（离谱程度）
+  "intensity": 0.0 到 1.0，整段对话有多“屎”（离谱程度），锚点：
+{anchors}
 }}"""
 
 DEFAULT_GROUP_PROMPT = """你在给一个群挑它会不会喜欢的屎。
@@ -124,6 +142,7 @@ class Analyzer:
         merged.setdefault("BILI_BLOCK", "")
         merged.setdefault("CONTEXT_BLOCK", "")
         merged.setdefault("messages", "")
+        merged.setdefault("anchors", INTENSITY_ANCHORS)  # 自定义提示词也要能用
         merged.setdefault("shit_text", "")
         merged.setdefault("shit_keywords", "")
         merged.setdefault("intake", "")
@@ -176,6 +195,7 @@ class Analyzer:
             "content": content,
             "BILI_BLOCK": bili_block,
             "CONTEXT_BLOCK": context,
+            "anchors": INTENSITY_ANCHORS,
         }
         template = self._prompt("shit_prompt", DEFAULT_SHIT_PROMPT)
         prompt = self._secure_format(template, prompts) + self._extra()
@@ -222,7 +242,10 @@ class Analyzer:
         if not messages_text.strip():
             return None
         template = self._prompt("context_prompt", DEFAULT_CONTEXT_PROMPT)
-        prompt = self._secure_format(template, {"messages": messages_text}) + self._extra()
+        prompt = self._secure_format(
+            template,
+            {"messages": messages_text, "anchors": INTENSITY_ANCHORS},
+        ) + self._extra()
         return await self.llm.generate_json(
             prompt,
             system_prompt=SYSTEM,

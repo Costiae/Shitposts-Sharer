@@ -66,13 +66,13 @@
   "shit_min_intensity": {
     "description": "判为屎的最低离谱度",
     "type": "float",
-    "hint": "模型给出的 0-1 离谱分低于此值就不搬。",
-    "default": 0.6
+    "hint": "模型给出的 0-1 离谱分低于此值就不搬。内置提示词按锚点打分：0.5-0.6 明显抽象值得分享，0.7-0.8 非常离谱。默认 0.45 即“至少够到值得分享的下沿”。嫌搬得少就降到 0.35，嫌吵就抬到 0.6。",
+    "default": 0.45
   },
   "shit_prompt": {
     "description": "判屎提示词（留空用内置）",
     "type": "text",
-    "hint": "可用占位符：{group_name} {kind} {content} {BILI_BLOCK} {CONTEXT_BLOCK}。必须要求模型输出 JSON。",
+    "hint": "可用占位符：{group_name} {kind} {content} {BILI_BLOCK} {CONTEXT_BLOCK} {anchors}。{anchors} 会展开成内置的 intensity 打分锚点。必须要求模型输出 JSON。",
     "default": ""
   },
   "context_prompt": {

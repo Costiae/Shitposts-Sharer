@@ -47,6 +47,7 @@ class PipelineStats:
     accepted: int = 0
     delivered: int = 0
     failed: int = 0
+    rejected_intensity: int = 0
     last_error: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -57,6 +58,7 @@ class PipelineStats:
             "accepted": self.accepted,
             "delivered": self.delivered,
             "failed": self.failed,
+            "rejected_intensity": self.rejected_intensity,
             "last_error": self.last_error,
         }
 
@@ -234,11 +236,21 @@ class Pipeline:
             return None
 
         analysis = verdict.analysis
+
+        # 留痕：判没判、判成啥、分数够不够，一眼可辨。
+        # 没有这行时，“判成不是屎”和“分数被阈值挡掉”在日志里长得一模一样。
+        min_intensity = float(self.settings.get("shit_min_intensity") or 0.0)
+        self.logger.info(
+            f"判定（{group_key}）is_shit={analysis.is_shit} "
+            f"intensity={analysis.intensity:.2f} "
+            f"min={min_intensity:.2f} reason={analysis.reason!r}"
+        )
+
         if not analysis.is_shit:
             return None
 
-        min_intensity = float(self.settings.get("shit_min_intensity") or 0.0)
         if analysis.intensity < min_intensity:
+            self.stats.rejected_intensity += 1
             return None
 
         self.stats.accepted += 1
