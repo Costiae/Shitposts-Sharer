@@ -180,9 +180,72 @@ class TestDebugCommands(unittest.TestCase):
         self.assertFalse(denied.ok)
         self.assertEqual(self.context.sent, [])
 
+    # ---------------------------------------------------------------- tidy
+    def test_tidy_targets_group_and_requires_admin(self):
+        class Runner:
+            def __init__(self):
+                self.calls = []
+
+            def run_tidy(self, key):
+                self.calls.append(key)
+                return f"tidy {key}"
+
+        runner = Runner()
+        self.commands.probe_force = runner
+
+        denied = self.commands.dispatch(self.event, ["tidy"])
+        self.assertFalse(denied.ok)
+        self.assertEqual(runner.calls, [])
+
+        result = self.commands.dispatch(
+            self.event, ["tidy", "200002"], is_admin=True
+        )
+        self.assertTrue(result.ok, result.text)
+        self.assertIn(GROUP_B, result.text)
+        self.assertEqual(runner.calls, [GROUP_B])
+
+    def test_tidy_rewrites_stored_taste(self):
+        group = self.storage.get_group(GROUP_B)
+        group.intake = {
+            "zz": 0.2,
+            "robot": 0.2,
+            "robots": 0.2,
+            "ai": 0.2,
+            "code": 0.2,
+        }
+        self.storage.upsert_group(group)
+
+        class FakeAnalyzer:
+            def __init__(self):
+                self.seen = []
+
+            async def tidy_terms(self, terms, umo=""):
+                self.seen = list(terms)
+                return {
+                    "drop": ["zz"],
+                    "groups": [
+                        {"canonical": "人工智能", "members": ["ai"]},
+                        {"canonical": "编程", "members": ["code"]},
+                    ],
+                }
+
+        analyzer = FakeAnalyzer()
+        self.pipeline.analyzer = analyzer
+        result = self.commands.dispatch(
+            self.event, ["tidy", "200002"], is_admin=True
+        )
+        self.assertTrue(result.ok, result.text)
+
+        intake = self.storage.get_group(GROUP_B).intake
+        self.assertNotIn("zz", intake)
+        self.assertIn("robots", intake)  # robot 已并进 robots
+        self.assertIn("人工智能", intake)
+        self.assertIn("编程", intake)
+        self.assertTrue(any(term == "robots" for term, _ in analyzer.seen))
+
     # ---------------------------------------------------------------- help
     def test_help_mentions_debug_commands(self):
-        for token in ("debug", "tags", "relay", "intake"):
+        for token in ("debug", "tags", "tidy", "relay", "intake"):
             self.assertIn(token, HELP_TEXT)
         HELP_TEXT.encode("ascii")
 

@@ -11,10 +11,19 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
+from typing import Any, Mapping
 
 from .config import Settings
-from .models import GroupProfile, ShitRecord
-from .vector import blend_into, cosine, decay_weight, merge_profile_terms
+from .models import GroupProfile, ShitRecord, normalized_vector
+from .terms import DEFAULT_RULES, TermRules
+from .vector import (
+    blend_into,
+    cosine,
+    decay_weight,
+    merge_profile_terms,
+    merge_similar_terms,
+)
 
 
 def update_intake(
@@ -37,13 +46,17 @@ def update_intake(
 
     weight = decay_weight(shit.ts)
     addend = {key: value * weight for key, value in shit.vector.items()}
-    group.intake = blend_into(before, addend, momentum=0.92 if is_native else 0.97)
+    rules = settings.term_rules
+    group.intake = blend_into(
+        before, addend, momentum=0.92 if is_native else 0.97, rules=rules
+    )
     # 每次新增样本都把整张口味表重新合并一遍：老词条（例如上次登记的
     # “抽象话”）和新词条（“抽象”）必须收敛到同一个概念，否则向量会被
-    # 相近的写法稀释。
+    # 相近的写法稀释。别名/停用词/单字也在这一步清理。
     group.intake = merge_profile_terms(
         group.intake,
-        threshold=float(settings.get("keyword_merge_threshold") or 0.6),
+        threshold=settings.keyword_merge_threshold,
+        rules=rules,
     )
 
     # 偏移度做指数平滑：单次跳题只让稳定度轻微下降，连续跳题才会明显掉。
@@ -100,8 +113,108 @@ def apply_rejection(group: GroupProfile, settings: Settings) -> None:
         group.native_message_count = max(0, group.native_message_count - 1)
 
 
-def describe_intake(group: GroupProfile, limit: int = 10) -> str:
+def compact_intake(
+    intake: dict[str, float],
+    rules: TermRules = DEFAULT_RULES,
+) -> dict[str, float]:
+    """把已存的口味压成规范词：别名归一、丢停用词/单字、同根词合并。
+
+    这一步会写回存储，主要用来清理旧版本留下的 ``站`` / ``玩梗`` / ``二次``
+    这类碎片。合并后重新归一化，保持和正常更新一致的尺度。
+    """
+    if not intake:
+        return {}
+    return normalized_vector(merge_similar_terms(intake, rules))
+
+
+def apply_term_rewrite(
+    intake: dict[str, float],
+    data: Mapping[str, Any],
+    rules: TermRules = DEFAULT_RULES,
+) -> dict[str, float]:
+    """按 LLM 的清理结果重写口味向量。
+
+    ``data`` 形如::
+
+        {
+          "drop": ["站", "玩梗"],
+          "groups": [
+            {"canonical": "人工智能", "members": ["ai", "人工智能"]}
+          ]
+        }
+
+    只接受原词表里出现过的成员；模型胡编的未知词直接忽略，避免无中生有。
+    ``canonical`` 可以不在原词表里（只要至少有一个成员在），这样模型能把
+    ``ai`` 归到一个更规范的写法上。
+    """
+    if not intake:
+        return {}
+
+    known = {rules.canonical(term) for term in intake}
+    drop_raw = data.get("drop") or []
+    if isinstance(drop_raw, str):
+        drop_raw = [drop_raw]
+    elif not isinstance(drop_raw, (list, tuple, set)):
+        drop_raw = []
+    drop = {
+        rules.canonical(str(term))
+        for term in drop_raw
+        if str(term).strip()
+    }
+
+    mapping: dict[str, str] = {}
+    groups = data.get("groups") or []
+    if isinstance(groups, list):
+        for item in groups:
+            if not isinstance(item, Mapping):
+                continue
+            canonical = rules.canonical(str(item.get("canonical") or ""))
+            if not canonical:
+                continue
+            members = item.get("members") or []
+            if isinstance(members, str):
+                members = [members]
+            elif not isinstance(members, (list, tuple, set)):
+                continue
+            for member in members:
+                key = rules.canonical(str(member))
+                if key in known:
+                    mapping[key] = canonical
+            if canonical in known:
+                mapping[canonical] = canonical
+
+    rewritten: dict[str, float] = defaultdict(float)
+    for term, value in intake.items():
+        key = rules.canonical(term)
+        if key in drop or rules.is_stopped(key):
+            continue
+        rewritten[mapping.get(key, key)] += value
+    return normalized_vector(merge_similar_terms(dict(rewritten), rules))
+
+
+def intake_terms(
+    group: GroupProfile,
+    limit: int = 0,
+    rules: TermRules = DEFAULT_RULES,
+) -> list[tuple[str, float]]:
+    """合并同根词后的口味词，按权重降序返回。
+
+    存储层已经在 ``blend_into`` 里合并过；这里再合并一次是为了照顾
+    旧版本留下的数据 —— 不重写库也能立刻得到干净的展示。
+    """
     if not group.intake:
+        return []
+    merged = merge_similar_terms(group.intake, rules)
+    items = sorted(merged.items(), key=lambda kv: kv[1], reverse=True)
+    return items[:limit] if limit > 0 else items
+
+
+def describe_intake(
+    group: GroupProfile,
+    limit: int = 10,
+    rules: TermRules = DEFAULT_RULES,
+) -> str:
+    terms = intake_terms(group, limit, rules)
+    if not terms:
         return "（还没有口味样本）"
-    top = sorted(group.intake.items(), key=lambda kv: kv[1], reverse=True)[:limit]
-    return "、".join(f"{key}({value:.2f})" for key, value in top)
+    return "、".join(f"{key}({value:.2f})" for key, value in terms)

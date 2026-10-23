@@ -135,6 +135,24 @@
     "hint": "追加到所有提示词末尾的自由文本，例如'二次元黑话算屎'。",
     "default": ""
   },
+  "tidy_prompt": {
+    "description": "口味词清理提示词",
+    "type": "text",
+    "hint": "用于 /shit tidy：让模型把口味词表里的碎片和同义词归并。留空使用内置提示词；可用 {terms} 占位符。",
+    "default": ""
+  },
+  "tag_stopwords": {
+    "description": "口味词停用词",
+    "type": "text",
+    "hint": "这些词不会进群口味向量，逗号/空格/换行分隔。内置已包含时间戳碎片（小时、时前）和只描述类型、不描述话题的词（玩梗、梗图）。",
+    "default": ""
+  },
+  "tag_aliases": {
+    "description": "口味词别名 / 同义词",
+    "type": "text",
+    "hint": "每行一条“规范词=别名1,别名2”，例如：人工智能=AI,artificial intelligence。同一概念的多种写法会先归一，再合并计权。",
+    "default": ""
+  },
   "analysis_provider_id": {
     "description": "分析模型",
     "type": "string",

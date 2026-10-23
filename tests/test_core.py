@@ -34,16 +34,26 @@ from core.models import (  # noqa: E402
     Segment,
     ShitRecord,
 )
-from core.profile import confidence_score, update_intake  # noqa: E402
+from core.profile import (  # noqa: E402
+    apply_term_rewrite,
+    compact_intake,
+    confidence_score,
+    describe_intake,
+    update_intake,
+)
 from core.router import Router, fingerprint_of  # noqa: E402
 from core.storage import Storage  # noqa: E402
+from core.terms import TermRules  # noqa: E402
 from core.vector import (  # noqa: E402
+    blend_into,
     build_vector,
     cosine,
     keyword_score,
     keyword_similarity,
     merge_profile_terms,
     merge_similar_keywords,
+    merge_similar_terms,
+    tokenize,
 )
 
 
@@ -135,7 +145,7 @@ class TestVector(unittest.TestCase):
     def test_tolerance_band(self):
         # 相近：共享主题词，余弦接近但略低于阈值 → 给及格分
         shit = build_vector(["抽象", "离谱", "逆天"], "抽象离谱的逆天发言内容", 0.5)
-        close = build_vector(["抽象", "离谱", "玩梗"], "抽象离谱的玩梗内容", 0.5)
+        close = build_vector(["抽象", "离谱", "复读"], "抽象离谱的复读内容", 0.5)
         far = build_vector(["考研", "数学"], "考研数学加油", 0.5)
 
         similar = cosine(shit, close)
@@ -147,6 +157,146 @@ class TestVector(unittest.TestCase):
         strict = keyword_score(shit, close, threshold=similar + 0.20, tolerance=0.05)
         self.assertEqual(strict, 0.0)
         self.assertEqual(keyword_score(shit, far, threshold=0.75), 0.0)
+
+    def test_keywords_stay_whole_terms(self):
+        """LLM 给的是词组，不能再被 2 字滑窗切成碎片。"""
+        vector = build_vector(["二次元", "机器人", "复读"], "", 1.0)
+        self.assertIn("二次元", vector)
+        self.assertIn("机器人", vector)
+        self.assertIn("复读", vector)
+        for fragment in ("二次", "次元", "机器"):
+            self.assertNotIn(fragment, vector)
+
+    def test_tags_are_whole_terms_and_split_on_separators(self):
+        vector = build_vector([], "", 1.0, ["代码", "机器 复读/抽象"])
+        for term in ("代码", "机器", "复读", "抽象"):
+            self.assertIn(term, vector)
+        self.assertNotIn("器复", vector)
+
+    def test_body_does_not_re_add_keyword_fragments(self):
+        vector = build_vector(["二次元"], "这是二次元机器人群聊", 0.5)
+        self.assertIn("二次元", vector)
+        self.assertNotIn("二次", vector)
+        self.assertNotIn("次元", vector)
+
+    def test_tokenize_drops_single_chars_and_timestamp_fragments(self):
+        tokens = tokenize("B站 3小时前")
+        for noise in ("站", "小时", "时前"):
+            self.assertNotIn(noise, tokens)
+
+    def test_similar_terms_merge_into_one_representative(self):
+        merged = merge_similar_terms({"机器": 1.0, "机器人": 2.0, "抽象": 1.0})
+        self.assertEqual(set(merged), {"机器人", "抽象"})
+        self.assertAlmostEqual(merged["机器人"], 3.0)
+
+    def test_similar_terms_merge_in_chains(self):
+        merged = merge_similar_terms(
+            {"二次元": 0.2, "二次元文化": 0.1, "二次元文化圈": 0.3}
+        )
+        self.assertEqual(set(merged), {"二次元文化圈"})
+        self.assertAlmostEqual(merged["二次元文化圈"], 0.6)
+
+    def test_single_char_terms_are_dropped(self):
+        # “站”只是“B站”被旧滑窗切剩下的碎片，不该在口味表里占位
+        merged = merge_similar_terms({"站": 1.0, "b站": 2.0})
+        self.assertEqual(set(merged), {"b站"})
+        self.assertEqual(merge_similar_terms({"草": 1.0}), {})
+
+    def test_blend_into_merges_legacy_fragments(self):
+        """旧版本存下的“二次/次元”遇到“二次元”时会自动并进去。"""
+        merged = blend_into({"二次": 0.5, "次元": 0.5}, {"二次元": 1.0})
+        self.assertIn("二次元", merged)
+        self.assertNotIn("二次", merged)
+        self.assertNotIn("次元", merged)
+
+    def test_describe_intake_merges_similar_terms(self):
+        group = GroupProfile(
+            group_key="g", intake={"机器": 0.5, "机器人": 0.5, "抽象": 0.3}
+        )
+        text = describe_intake(group)
+        self.assertIn("机器人", text)
+        self.assertIn("抽象", text)
+        self.assertNotIn("机器(", text)
+
+    def test_stopwords_drop_meta_and_timestamp_terms(self):
+        vector = build_vector(["玩梗", "小时", "代码"], "玩梗 3小时前 代码", 0.5)
+        self.assertIn("代码", vector)
+        for noise in ("玩梗", "小时", "时前", "梗内"):
+            self.assertNotIn(noise, vector)
+
+    def test_alias_merges_abbreviation_with_full_name(self):
+        vector = build_vector(["AI", "人工智能"], "", 0.5)
+        self.assertEqual(set(vector), {"人工智能"})
+        merged = merge_similar_terms({"ai": 1.0, "人工智能": 2.0})
+        self.assertEqual(set(merged), {"人工智能"})
+        self.assertAlmostEqual(merged["人工智能"], 3.0)
+
+    def test_custom_rules_extend_builtin_tables(self):
+        rules = TermRules.build("缝合", "赛博朋克=cyberpunk")
+        vector = build_vector(["缝合", "cyberpunk"], "", 0.5, rules=rules)
+        self.assertEqual(set(vector), {"赛博朋克"})
+        self.assertTrue(rules.is_stopped("缝合"))
+
+    def test_settings_parse_tag_rules(self):
+        settings = make_settings(tag_aliases="人工智能=AI,ai", tag_stopwords="缝合")
+        self.assertEqual(settings.term_rules.canonical("AI"), "人工智能")
+        self.assertTrue(settings.term_rules.is_stopped("缝合"))
+
+    def test_alias_config_accepts_json_object(self):
+        settings = make_settings(tag_aliases='{"人工智能": ["AI", "人工智慧"]}')
+        self.assertEqual(settings.term_rules.canonical("人工智慧"), "人工智能")
+
+    def test_describe_intake_hides_stopwords(self):
+        group = GroupProfile(group_key="g", intake={"玩梗": 0.4, "代码": 0.3})
+        text = describe_intake(group)
+        self.assertIn("代码", text)
+        self.assertNotIn("玩梗", text)
+
+    def test_compact_intake_removes_legacy_fragments(self):
+        compacted = compact_intake(
+            {"站": 0.2, "机器": 0.2, "机器人": 0.2, "代码": 0.4}
+        )
+        self.assertEqual(set(compacted), {"机器人", "代码"})
+        self.assertAlmostEqual(sum(v * v for v in compacted.values()), 1.0)
+
+    def test_apply_term_rewrite_merges_and_drops(self):
+        rewritten = apply_term_rewrite(
+            {"ai": 0.3, "人工智能": 0.2, "站": 0.2, "代码": 0.3},
+            {
+                "drop": ["站"],
+                "groups": [
+                    {"canonical": "人工智能", "members": ["ai", "人工智能"]}
+                ],
+            },
+        )
+        self.assertEqual(set(rewritten), {"人工智能", "代码"})
+        self.assertAlmostEqual(rewritten["人工智能"] / rewritten["代码"], 5 / 3)
+        self.assertAlmostEqual(sum(v * v for v in rewritten.values()), 1.0)
+
+    def test_apply_term_rewrite_can_create_canonical(self):
+        # “二次”+“次元”合到一个原本不在表里的“二次元”
+        rewritten = apply_term_rewrite(
+            {"二次": 0.2, "次元": 0.2, "代码": 0.6},
+            {
+                "groups": [
+                    {"canonical": "二次元", "members": ["二次", "次元"]}
+                ]
+            },
+        )
+        self.assertEqual(set(rewritten), {"二次元", "代码"})
+        self.assertAlmostEqual(rewritten["代码"] / rewritten["二次元"], 1.5)
+
+    def test_apply_term_rewrite_ignores_unknown_terms(self):
+        rewritten = apply_term_rewrite(
+            {"代码": 1.0},
+            {
+                "drop": ["不存在的词"],
+                "groups": [
+                    {"canonical": "量子计算", "members": ["不存在的词"]}
+                ],
+            },
+        )
+        self.assertEqual(set(rewritten), {"代码"})
 
 
 class TestConfidence(unittest.TestCase):

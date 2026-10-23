@@ -6,8 +6,10 @@ AstrBot 把 _conf_schema.json 渲染成 WebUI 表单，插件里以 dict 形式�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+
+from .terms import TermRules
 
 DEFAULTS: dict[str, Any] = {
     # ---- 日志 ----
@@ -47,6 +49,7 @@ DEFAULTS: dict[str, Any] = {
     "shit_prompt": "",
     "context_prompt": "",
     "group_prompt": "",
+    "tidy_prompt": "",
     "extra_prompt": "",
     # ---- 信任与路由 ----
     "confidence_k": 10.0,
@@ -63,6 +66,11 @@ DEFAULTS: dict[str, Any] = {
     "llm_rerank": True,
     "llm_candidates": 3,
     "max_targets": 0,
+    # ---- 口味词 ----
+    # 停用词：只描述“这是一坨屎”的元词（玩梗、时间戳碎片）不该进向量
+    "tag_stopwords": "",
+    # 别名：规范词=别名1,别名2（如 人工智能=AI）
+    "tag_aliases": "",
     # ---- 搬运 ----
     "with_context": True,
     "max_context_messages": 6,
@@ -81,6 +89,17 @@ DEFAULTS: dict[str, Any] = {
 @dataclass(slots=True)
 class Settings:
     raw: dict[str, Any]
+    _term_rules: TermRules = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._term_rules = TermRules.build(
+            self.get("tag_stopwords"), self.get("tag_aliases")
+        )
+
+    @property
+    def term_rules(self) -> TermRules:
+        """口味词的停用词 / 别名规则（构造时解析一次）。"""
+        return self._term_rules
 
     def get(self, key: str, default: Any = None) -> Any:
         value = self.raw.get(key, DEFAULTS.get(key))

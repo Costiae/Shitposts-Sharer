@@ -31,7 +31,13 @@ from .models import (
     ShitRecord,
     normalize_text,
 )
-from .profile import describe_intake, update_intake
+from .profile import (
+    apply_term_rewrite,
+    compact_intake,
+    describe_intake,
+    intake_terms,
+    update_intake,
+)
 from .router import Router, fingerprint_of
 from .sender import build_chain, send_to_group
 from .storage import Storage
@@ -480,6 +486,7 @@ class Pipeline:
             analysis.intensity,
             analysis.tags,
             merge_threshold=merge_threshold,
+            rules=self.settings.term_rules,
         )
         if not vector:
             # 兜底：至少用正文分词，不然这条屎永远匹配不上任何群
@@ -489,6 +496,7 @@ class Pipeline:
                 analysis.intensity,
                 analysis.tags,
                 merge_threshold=merge_threshold,
+                rules=self.settings.term_rules,
             )
 
         record = ShitRecord(
@@ -736,8 +744,10 @@ class Pipeline:
             ts=time.time(),
             kind=Kind(analysis_kind(message.kind_hint())),
             text_blob=blob,
-            keywords=[token for token in tokenize(blob)[:8]],
-            vector=build_vector([], blob, 0.5),
+            keywords=[
+                token for token in tokenize(blob, rules=self.settings.term_rules)[:8]
+            ],
+            vector=build_vector([], blob, 0.5, rules=self.settings.term_rules),
             payload=[seg.to_dict() for seg in message.segments],
             reason="forced (debug)",
         )
@@ -791,6 +801,77 @@ class Pipeline:
             "detail": f"{prefix}={delivered or '-'} failed={failed or '-'}",
         }
 
+    async def tidy_intake(self, group_key: str = "") -> dict[str, Any]:
+        """用 LLM 清理一个群的口味词表。
+
+        先做一次本地压缩（别名、停用词、单字、同根词），把旧数据里的
+        ``站`` 这类单字碎片先清掉；再让模型处理本地规则覆盖不到的
+        同义关系（``代码`` / ``编程``、``二次`` / ``次元`` → ``二次元``）。
+        只由管理员显式触发，不在消息链路上。
+        """
+        group = self.storage.get_group(group_key) if group_key else None
+        if group is None:
+            return {"ok": False, "detail": f"group not found: {group_key or '-'}"}
+
+        rules = self.settings.term_rules
+        before = len(group.intake)
+        group.intake = compact_intake(group.intake, rules)
+        compacted = len(group.intake)
+
+        terms = intake_terms(group, 60, rules)
+        if not terms:
+            self.storage.upsert_group(group)
+            return {
+                "ok": True,
+                "detail": f"taste terms {before} -> 0 (nothing left to tidy)",
+            }
+
+        data = await self.analyzer.tidy_terms(terms, group.group_key)
+        if not data:
+            self.storage.upsert_group(group)
+            return {
+                "ok": True,
+                "detail": (
+                    f"compacted {before} -> {compacted}; "
+                    "LLM returned nothing, left as is"
+                ),
+            }
+
+        group.intake = apply_term_rewrite(group.intake, data, rules)
+        self.storage.upsert_group(group)
+        drops = data.get("drop") or []
+        groups = data.get("groups") or []
+        drop_count = len(drops) if isinstance(drops, (list, tuple, set)) else "?"
+        merge_count = len(groups) if isinstance(groups, list) else "?"
+        return {
+            "ok": True,
+            "detail": (
+                f"taste terms {before} -> {len(group.intake)}; "
+                f"drop={drop_count} merge={merge_count}"
+            ),
+        }
+
+    def run_tidy(self, group_key: str) -> dict[str, Any]:
+        """同步桥：``/shit tidy`` 的指令层是同步的。"""
+        try:
+            result = asyncio.run(self.tidy_intake(group_key))
+        except RuntimeError:
+            box: dict[str, Any] = {}
+
+            def _worker() -> None:
+                box["value"] = asyncio.run(self.tidy_intake(group_key))
+
+            thread = threading.Thread(target=_worker)
+            thread.start()
+            thread.join()
+            result = box.get("value", {"ok": False, "detail": "worker failed"})
+        except Exception as exc:  # pragma: no cover - defensive
+            return {"ok": False, "detail": f"tidy failed: {type(exc).__name__}: {exc}"}
+
+        if isinstance(result, dict):
+            return result
+        return {"ok": bool(result), "detail": str(result)}
+
     def run(self, event: Any, target_key: str, incoming: bool) -> dict[str, Any]:
         """同步桥：指令层是同步的，这里把协程跑完并返回结构化结果。"""
         try:
@@ -827,7 +908,7 @@ class Pipeline:
             f"可信度：{confidence:.2f}"
             f"（原生屎 {group.native_message_count} 条 / {group.native_char_count} 字，"
             f"被拒绝 {group.rejected_count} 次）",
-            f"口味：{describe_intake(group)}",
+            f"口味：{describe_intake(group, rules=self.settings.term_rules)}",
         ]
         if recent:
             lines.append("最近搬运：")

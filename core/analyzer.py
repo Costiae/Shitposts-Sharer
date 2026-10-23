@@ -15,6 +15,7 @@ from .config import Settings
 from .detector import summarise_segments
 from .llm import LLMClient
 from .models import Analysis, GroupProfile
+from .profile import intake_terms
 
 SYSTEM = (
     "你是一个群聊搬运工的鉴屎员。你的任务是从一坨群聊内容里判断它是否是"
@@ -72,6 +73,10 @@ is_shit=false 时 intensity 可以为 0；但只要你判了 is_shit=true，
 安全要求：如果图片涉及未成年人的性化内容，必须 minor_sexual=true 且 is_shit=false。
 不要输出任何露骨描写。
 
+关键词和 tags 用最简的规范写法：同一个概念只给一种说法，
+不要同时列出近义词或加修饰的长短语（例如统一用“二次元”，
+不要同时给“二次元文化”“二次元圈”）。
+
 只输出 JSON：
 {{
   "is_shit": true/false,
@@ -95,6 +100,8 @@ DEFAULT_CONTEXT_PROMPT = """下面是群聊里的一段对话。请判断这些�
 ---
 {messages}
 ---
+
+关键词用最简的规范写法：同一个概念只给一种说法，不要同时列近义词。
 
 只输出 JSON：
 {{
@@ -141,6 +148,34 @@ DEFAULT_GROUP_PROMPT = """你在给一个群挑它会不会喜欢的屎。
 }}"""
 
 
+TIDY_SYSTEM = "你是一个数据清洗助手。只输出一个 JSON 对象，不要输出任何解释。"
+
+DEFAULT_TIDY_PROMPT = """你在清理一个群的口味词表。下面是系统累积的“话题词”，
+每行格式为“词: 权重”。
+
+{terms}
+
+请做三件事：
+1. drop：删掉没有信息量的碎片（单字、时间戳、标点残留）和只描述
+   “这是一坨屎 / 在玩梗”的元词；
+2. groups：把同一个概念的不同写法归到一个最规范的词上
+   （例如 AI / 人工智能 → 人工智能，音游 / 音乐游戏 → 音乐游戏）；
+3. 其余词保持原样。
+
+约束：
+- drop 和 groups[].members 里的词必须来自上面的词表；
+- 每个词最多出现在一个 group 里；
+- 不要发明新话题；canonical 尽量也用词表里的写法。
+
+只输出 JSON：
+{{
+  "drop": ["站", "玩梗"],
+  "groups": [
+    {{"canonical": "人工智能", "members": ["ai", "人工智能"]}}
+  ]
+}}"""
+
+
 @dataclass(slots=True)
 class ShitVerdict:
     analysis: Analysis
@@ -177,6 +212,7 @@ class Analyzer:
         merged.setdefault("shit_keywords", "")
         merged.setdefault("intake", "")
         merged.setdefault("recent_keywords", "")
+        merged.setdefault("terms", "")
 
         class _Safe(dict):
             def __missing__(self, key: str) -> str:
@@ -319,6 +355,30 @@ class Analyzer:
             return None
         return as_bool(value)
 
+    # ------------------------------------------------------------ 口味词清理
+    async def tidy_terms(
+        self,
+        terms: list[tuple[str, float]],
+        umo: str = "",
+    ) -> dict[str, Any] | None:
+        """让模型把口味词表里的碎片 / 同义词归并一次。
+
+        这是低频、显式触发的操作（``/shit tidy``），不在每条消息的链路上，
+        所以可以放心用一次完整的 LLM 调用换取更干净的长期口味。
+        """
+        if not terms:
+            return None
+        rendered = "\n".join(f"{term}: {weight:.3f}" for term, weight in terms)
+        template = self._prompt("tidy_prompt", DEFAULT_TIDY_PROMPT)
+        prompt = self._secure_format(template, {"terms": rendered}) + self._extra()
+        data = await self.llm.generate_json(
+            prompt,
+            system_prompt=TIDY_SYSTEM,
+            provider_id=str(self.settings.get("analysis_provider_id") or ""),
+            umo=umo,
+        )
+        return data if isinstance(data, dict) else None
+
     # ------------------------------------------------------------ 群契合度
     async def score_groups(
         self,
@@ -341,9 +401,9 @@ class Analyzer:
                     key=group.group_key,
                     intake="、".join(
                         f"{tag}({weight:.2f})"
-                        for tag, weight in sorted(
-                            group.intake.items(), key=lambda kv: kv[1], reverse=True
-                        )[:8]
+                        for tag, weight in intake_terms(
+                            group, 8, self.settings.term_rules
+                        )
                     )
                     or "（还没有口味，样本不足）",
                     recent="、".join(recent_keywords.get(group.group_key, [])[:6])

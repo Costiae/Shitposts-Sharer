@@ -20,7 +20,7 @@ from typing import Any
 
 from .config import Settings
 from .models import Direction, GroupProfile
-from .profile import describe_intake
+from .profile import describe_intake, intake_terms
 from .storage import Storage
 from .targets import (
     current_origin,
@@ -47,6 +47,7 @@ HELP_TEXT = """Shitposts Sharer commands
 Debug (admin):
   /shit debug [target]                                show every gate and why it failed
   /shit tags [target]                                 dump taste terms (all groups if omitted)
+  /shit tidy [target]                                 LLM-merge/drop taste terms
   /shit relay [target]                                bypass direction/taste/confidence, relay now
   /shit intake [target]                               force this message into the taste update
   /shoot <text>                                       admin: test one payload
@@ -87,7 +88,7 @@ class Commands:
         # 可选探针：调试指令要读运行时状态，但指令层不该直接依赖 pipeline。
         # probe_llm        -> 有 .available 属性
         # probe_pipeline   -> 有 .pending() 方法
-        # probe_force      -> 有 .run(event, target_key, incoming) 方法
+        # probe_force      -> 有 .run(event, target_key, incoming) / .run_tidy(key) 方法
         self.probe_llm = probe_llm
         self.probe_pipeline = probe_pipeline
         self.probe_force = probe_force
@@ -128,6 +129,8 @@ class Commands:
             return self.debug(event, rest, is_admin=is_admin)
         if action in ("tags", "tag"):
             return self.tags(event, rest, is_admin=is_admin)
+        if action in ("tidy", "clean", "merge"):
+            return self.tidy(event, rest, is_admin=is_admin)
         if action in ("relay", "forceout", "push"):
             # 当作源屎，忽略方向/口味/可信度，直接推出去
             return self.force_delivery(event, rest, is_admin=is_admin, incoming=True)
@@ -196,7 +199,7 @@ class Commands:
         if llm_ok is not None:
             lines.append(f"  llm available: {llm_ok}")
         if group.intake:
-            top = sorted(group.intake.items(), key=lambda kv: kv[1], reverse=True)[:8]
+            top = intake_terms(group, 8, self.settings.term_rules)
             lines.append("  top taste terms: " + ", ".join(f"{k}:{v:.3f}" for k, v in top))
         else:
             lines.append("  top taste terms: (empty)")
@@ -230,7 +233,7 @@ class Commands:
                 return CommandResult(f"Target not found: {token}", ok=False)
             group = resolution.group
             assert group is not None
-            terms = sorted(group.intake.items(), key=lambda kv: kv[1], reverse=True)
+            terms = intake_terms(group, rules=self.settings.term_rules)
             if not terms:
                 return CommandResult(
                     f"{describe_group(group)}\ntags: (none yet - no shit judged here)"
@@ -247,7 +250,7 @@ class Commands:
             return CommandResult("No group registered yet.")
         lines = []
         for group in groups:
-            terms = sorted(group.intake.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            terms = intake_terms(group, 5, self.settings.term_rules)
             shown = ", ".join(key for key, _ in terms) or "-"
             lines.append(
                 f"{group.group_key} [{group.direction.value}] "
@@ -288,6 +291,39 @@ class Commands:
             outcome = runner(event, target_key, incoming)
         except Exception as exc:  # pragma: no cover - defensive
             return CommandResult(f"Force delivery failed: {type(exc).__name__}: {exc}", ok=False)
+        if isinstance(outcome, dict):
+            return CommandResult(
+                str(outcome.get("detail", outcome)),
+                ok=bool(outcome.get("ok", False)),
+            )
+        return CommandResult(outcome if isinstance(outcome, str) else str(outcome))
+
+    # ------------------------------------------------------------------ 口味清理
+    def tidy(
+        self, event: Any, args: list[str], *, is_admin: bool = False
+    ) -> CommandResult:
+        """用 LLM 清理一个群的口味词表：删碎片、并同义词。"""
+        if not is_admin:
+            return CommandResult("Admin only.", ok=False)
+
+        runner = getattr(self.probe_force, "run_tidy", None)
+        if not callable(runner):
+            return CommandResult("Tidy is unavailable: pipeline not wired.", ok=False)
+
+        token = args[0] if args else ""
+        resolution = resolve(self.storage, event, token)
+        if resolution.status == "ambiguous":
+            return CommandResult(render_ambiguous(resolution, self.storage), ok=False)
+        if not resolution.ok or resolution.group is None:
+            detail = f"Target not found: {token}" if token else "Group not registered."
+            return CommandResult(detail, ok=False)
+
+        try:
+            outcome = runner(resolution.group.group_key)
+        except Exception as exc:  # pragma: no cover - defensive
+            return CommandResult(
+                f"Tidy failed: {type(exc).__name__}: {exc}", ok=False
+            )
         if isinstance(outcome, dict):
             return CommandResult(
                 str(outcome.get("detail", outcome)),
@@ -412,7 +448,7 @@ class Commands:
             f"image     : {'on' if group.image_enabled else 'off'}\n"
             f"confidence: {self._confidence(group):.2f} "
             f"(threshold {self.settings.threshold_for(group.threshold):.2f})\n"
-            f"taste     : {describe_intake(group)}\n"
+            f"taste     : {describe_intake(group, rules=self.settings.term_rules)}\n"
             f"\nConfidence accrues from the group's own native shit samples."
         )
 
@@ -551,7 +587,7 @@ class Commands:
             f"{group.native_char_count} chars\n"
             f"drift     : {group.drift:.2f} (stability {1 - 0.6 * group.drift:.2f})\n"
             f"accepted  : {group.accepted_count}  rejected: {group.rejected_count}\n"
-            f"taste     : {describe_intake(group)}"
+            f"taste     : {describe_intake(group, rules=self.settings.term_rules)}"
         )
 
     def list_groups(self) -> CommandResult:

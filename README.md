@@ -201,6 +201,7 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 | --- | --- | --- |
 | `/shit debug [target]` | 摊开每一道闸门：插件开关、群是否注册、方向、可信度 vs 阈值、LLM 是否可用、待处理窗口数 | 只读 |
 | `/shit tags [target]` | 导出群的口味词表（省略则汇总所有群） | 只读 |
+| `/shit tidy [target]` | 用 LLM 清理口味词表：删碎片/无效词、合并同义词 | 会改口味，不发消息 |
 | `/shit relay [target]` | **无条件搬出**：忽略方向/口味/可信度/LLM 复核；不指定 target 时推到所有已启用群（源群除外） | 会发消息；图片仍过安全检查，遵守图片开关与 `dry_run` |
 | `/shit intake [target]` | **无条件搬入**：只更新目标群口味，不往外发 | 会改口味，不发消息 |
 | `/shoot <文本>` | 把一段文本直接丢进判定流水线 | 可能发消息 |
@@ -212,7 +213,7 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 
 - 操作**当前群**不需要管理员（群友可自助注册、开关自己的群）
 - `<target>` 指向别的群时，修改类指令需要管理员
-- `debug` / `tags` / `relay` / `intake` / `shoot` 仅管理员
+- `debug` / `tags` / `tidy` / `relay` / `intake` / `shoot` 仅管理员
 - `status` / `list` 是只读查询，不强制管理员
 
 `/shit` 的别名：`/spam`、`/ss`。
@@ -248,7 +249,7 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 | `shit_min_intensity` | 0.45 | 离谱分低于此值不搬 |
 | `with_context` | true | 搬运时附带群友讨论 |
 | `max_context_messages` | 6 | 附带几条上下文（0 会被当作 6） |
-| `shit_prompt` / `context_prompt` / `group_prompt` / `extra_prompt` | 空 | 自定义提示词；留空用内置 |
+| `shit_prompt` / `context_prompt` / `group_prompt` / `tidy_prompt` / `extra_prompt` | 空 | 自定义提示词；留空用内置 |
 
 ### 匹配与路由
 
@@ -258,10 +259,20 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 | `threshold_overall` | 0 | 群可信度门槛；0 = 不拦。单群可用 `/shit threshold` 覆盖 |
 | `keyword_threshold` / `keyword_tolerance` | 0.75 / 0.10 | 文本关键词匹配的阈值与容差带 |
 | `keyword_merge_threshold` | 0.6 | 相似关键词合并阈值（每次更新重合并整张口味表） |
+| `tag_stopwords` | 空 | 追加的口味词停用词（逗号/空格/换行分隔）；内置已含时间戳碎片与“玩梗”等元词 |
+| `tag_aliases` | 空 | 追加的别名表，每行 `规范词=别名1,别名2`（如 `人工智能=AI`） |
 | `image_match_threshold` / `image_match_tolerance` | 0.6 / 0.12 | 图片标签独立门槛；文字匹配不能代替 |
 | `llm_rerank` | true | 关键词粗筛后用 LLM 复核候选群 |
 | `llm_candidates` | 3 | 进入 LLM 复核的前 N 个候选群 |
 | `max_targets` | 0 | 单条屎最多搬几个群；0 = 不限 |
+
+口味词进向量前会先做四步清洗：**停用词**（时间戳碎片、`玩梗` 这类只描述“是不是屎”的元词）、
+**别名归一**（`AI` → `人工智能`）、**丢单字**（`站` 只是 `B站` 被旧滑窗切剩的碎片）、
+**同根词合并**（`机器人` 吞并 `机器`）。前三步由本地规则即时完成，内置表可以直接用，
+也可以在上面两个配置项里追加。
+
+本地规则覆盖不到的同义关系（例如 `代码` / `编程`），用管理员指令 `/shit tidy [target]`
+交给模型做一次归并。它只改口味表，不搬消息；模型返回的未知词会被忽略，不会无中生有。
 
 ### 搬运与模型
 
@@ -280,6 +291,7 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `log_level` | normal | `off` / `normal` / `full`，见下节 |
+
 
 ## 日志
 
@@ -363,7 +375,7 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 python -m unittest discover -s tests -t . -v
 ```
 
-当前 180 个测试。测试不需要 `astrbot` 包：发送组件用替身覆盖，
+当前 202 个测试。测试不需要 `astrbot` 包：发送组件用替身覆盖，
 核心逻辑（向量、可信度、路由、存储、上下文窗口、流水线、图片门槛、
 安全拦截、群图片开关、迁移）全部可在纯 Python 下测试。
 
@@ -377,6 +389,7 @@ core/
   models.py        # 数据结构（GroupProfile / ShitRecord / Message ...）
   storage.py       # SQLite：群、屎、搬运记录、设置、schema 迁移
   config.py        # 配置读取与阈值解析
+  terms.py         # 口味词清洗：停用词、别名归一
   vector.py        # 关键词向量：分词、加权、余弦、容差、全表合并
   profile.py       # 口味更新与可信度公式
   similarity.py    # 关键词匹配与图片标签匹配

@@ -110,6 +110,23 @@ class TestAnchorsPresent(unittest.TestCase):
         self.assertIn("自定义", context.prompts[0])
         self.assertIn("0.7-0.8", context.prompts[0])
 
+    def test_tidy_prompt_lists_terms_and_renders_json_example(self):
+        context = RecordingContext(
+            reply=(
+                '{"drop": ["站"], "groups": '
+                '[{"canonical": "人工智能", "members": ["ai"]}]}'
+            )
+        )
+        analyzer = Analyzer(Settings(dict(DEFAULTS)), LLMClient(context))
+        data = asyncio.run(analyzer.tidy_terms([("ai", 0.4), ("站", 0.2)]))
+
+        self.assertEqual(data["drop"], ["站"])
+        prompt = context.prompts[0]
+        self.assertIn("ai: 0.400", prompt)
+        self.assertIn("站: 0.200", prompt)
+        self.assertNotIn("{terms}", prompt)
+        self.assertIn('"drop"', prompt)  # JSON 示例的花括号没被 format 吃掉
+
     def test_custom_prompt_without_anchors_still_works(self):
         """老的自定义提示词里没有 {anchors}，不能因此报错。"""
         raw = dict(DEFAULTS)

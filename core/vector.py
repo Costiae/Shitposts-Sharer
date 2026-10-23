@@ -14,10 +14,15 @@ from collections import defaultdict
 from typing import Iterable
 
 from .models import normalized_vector
+from .terms import DEFAULT_RULES, TermRules
 
 # 中英文分词：连续汉字按 2 字滑窗，英文/数字按单词
 _CJK = re.compile(r"[\u4e00-\u9fff]+")
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9_]{1,}|[0-9]{2,}")
+# 关键词/标签内部的分隔符：模型偶尔会把多个词塞进同一个字符串
+_TERM_SEPARATORS = re.compile(r"[\s,，、;；:：/|·\-—~～]+")
+# 词条两端的标点/引号
+_TERM_EDGE = re.compile(r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$")
 
 _STOP_CHARS = set("的了是我你他她它们在有不一个人这那里就都而及与或等啊吧呢嘛哦啊嗯诶呀")
 _STOP_WORDS = {
@@ -25,28 +30,168 @@ _STOP_WORDS = {
     "http", "https", "www", "com", "cn", "bilibili", "b23", "bv",
 }
 
+# 2 字滑窗不认词边界，正文里必然切出“小时/时前”这类碎片。
+# 真正的词组由 keywords/tags 整词进入向量；正文里用 TermsRules 的
+# 停用词表拦掉这些碎片（见 core/terms.py）。
+
+# 中英混排（“B站转发”“3小时前”）在切块前先断开，避免跨脚本切出“站转”。
+_SCRIPT_EDGE = re.compile(
+    r"(?<=[A-Za-z0-9])(?=[\u4e00-\u9fff])|(?<=[\u4e00-\u9fff])(?=[A-Za-z0-9])"
+)
+
+
 DEFAULT_HALF_LIFE_DAYS = 30.0
 
 
-def tokenize(text: str, grams: int = 2) -> list[str]:
-    """把文本切成候选关键词。"""
-    text = text or ""
+def tokenize(
+    text: str,
+    grams: int = 2,
+    exclude: Iterable[str] = (),
+    rules: TermRules = DEFAULT_RULES,
+) -> list[str]:
+    """把正文切成候选关键词（只是低权重的召回信号）。
+
+    注意：这里只服务正文。LLM 给出的 keywords/tags 本身已经是词组，
+    走 :func:`_term_tokens` 整词入向量，不会再被滑窗切开；单个汉字
+    歧义太大（“B站”只会剩下个“站”），正文里直接丢掉。
+
+    ``exclude`` 里的整词在正文里出现时，跨越它边界的滑窗也一并跳过：
+    “抽象离谱”不该再切出“象离”，“二次元机器人”不该切出“元机”。
+    ``rules`` 负责停用词与别名归一（``AI`` → ``人工智能``）。
+    """
+    text = _SCRIPT_EDGE.sub(" ", text or "")
+    terms = [str(term) for term in exclude if term]
+    # 停用词也按“整词占位”处理：拦掉“玩梗”本身，也拦掉跨过它的“梗内”。
+    blocked = [*terms, *rules.stopwords]
     tokens: list[str] = []
     for chunk in _CJK.findall(text):
-        if len(chunk) == 1:
-            if chunk not in _STOP_CHARS:
-                tokens.append(chunk)
+        if len(chunk) < grams:
             continue
+        covered = _covered_positions(chunk, blocked)
         for i in range(len(chunk) - grams + 1):
-            gram = chunk[i : i + grams]
+            if any(covered[i : i + grams]):
+                continue
+            gram = rules.canonical(chunk[i : i + grams])
+            if rules.is_stopped(gram):
+                continue
             if any(ch in _STOP_CHARS for ch in gram):
                 continue
             tokens.append(gram)
     for word in _WORD.findall(text.lower()):
-        if word in _STOP_WORDS or len(word) < 2:
+        if len(word) < 2:
+            continue
+        word = rules.canonical(word)
+        if word in _STOP_WORDS or rules.is_stopped(word):
             continue
         tokens.append(word)
     return tokens
+
+
+def _covered_positions(chunk: str, terms: Iterable[str]) -> list[bool]:
+    """标出正文里已经由整词关键词覆盖的字符位置。"""
+    covered = [False] * len(chunk)
+    for term in terms:
+        if not term or not _CJK.fullmatch(term):
+            continue
+        start = chunk.find(term)
+        while start >= 0:
+            for index in range(start, start + len(term)):
+                covered[index] = True
+            start = chunk.find(term, start + 1)
+    return covered
+
+
+def _term_tokens(term: str, rules: TermRules = DEFAULT_RULES) -> list[str]:
+    """把一个关键词/标签拆成“整词”，而不是 2 字滑窗碎片。
+
+    ``二次元`` → ``["二次元"]``，不会变成 ``二次``/``次元``。
+    模型偶尔会在一个字段里用空格或斜杠并列多个词，这里一并拆开。
+    最后再走一遍停用词与别名归一（``AI`` → ``人工智能``）。
+    """
+    tokens: list[str] = []
+    for piece in _TERM_SEPARATORS.split(str(term or "")):
+        piece = _TERM_EDGE.sub("", piece.strip().lower())
+        if not piece:
+            continue
+        piece = rules.canonical(piece)
+        if piece in _STOP_WORDS or rules.is_stopped(piece):
+            continue
+        if len(piece) == 1:
+            if piece in _STOP_CHARS:
+                continue
+        elif all(ch in _STOP_CHARS for ch in piece):
+            continue
+        tokens.append(piece)
+    return tokens
+
+
+def _normalize_terms(
+    weights: dict[str, float],
+    rules: TermRules,
+) -> dict[str, float]:
+    """别名归一、停用词过滤、丢单字，并把同一规范词的权重相加。"""
+    normalized: dict[str, float] = defaultdict(float)
+    for term, value in weights.items():
+        canonical = rules.canonical(str(term))
+        if canonical in _STOP_WORDS or rules.is_stopped(canonical):
+            continue
+        if len(canonical) < 2:
+            continue
+        normalized[canonical] += value
+    return dict(normalized)
+
+
+def merge_similar_terms(
+    weights: dict[str, float],
+    rules: TermRules = DEFAULT_RULES,
+) -> dict[str, float]:
+    """先归一别名、丢掉停用词，再合并同根词。
+
+    ``机器`` / ``机器人``、``二次元`` / ``二次元文化`` 会并成一项，
+    权重相加；代表词取当前权重最高（同权取更长）的那个。
+    ``AI`` 与 ``人工智能`` 靠 ``rules`` 的别名表归到同一个词。
+
+    单字词一律丢掉：它们几乎不含话题信息，多半是旧版滑窗切出来的碎片
+    （“站”来自“B站”），留着只会在展示里占位。真正有意义的单字黑话
+    交给 LLM 清理，或者写进别名表归到更长的规范词上。
+
+    只处理“包含关系”和显式别名。``代码`` 与 ``编程`` 这类没有词表的
+    同义词不在这里硬猜（可写进插件的别名配置，或用 ``/shit tidy``）。
+    """
+    weights = _normalize_terms(weights, rules)
+    if len(weights) < 2:
+        return weights
+
+    terms = sorted(weights, key=lambda term: (len(term), term))
+    parent = {term: term for term in terms}
+
+    def find(term: str) -> str:
+        root = term
+        while parent[root] != root:
+            root = parent[root]
+        while parent[term] != root:
+            parent[term], term = root, parent[term]
+        return root
+
+    for index, short in enumerate(terms):
+        for later in range(index + 1, len(terms)):
+            longer = terms[later]
+            if short not in longer:
+                continue
+            left, right = find(short), find(longer)
+            if left != right:
+                parent[right] = left
+
+    groups: dict[str, list[str]] = defaultdict(list)
+    for term in terms:
+        groups[find(term)].append(term)
+
+    merged: dict[str, float] = {}
+    for members in groups.values():
+        # 同权时取更长的一个：旧数据里的短词多半是被截断的碎片。
+        representative = max(members, key=lambda term: (weights[term], len(term)))
+        merged[representative] = sum(weights[term] for term in members)
+    return merged
 
 
 def build_vector(
@@ -56,6 +201,7 @@ def build_vector(
     tags: Iterable[str] = (),
     *,
     merge_threshold: float = 0.6,
+    rules: TermRules = DEFAULT_RULES,
 ) -> dict[str, float]:
     """关键词加权 → 归一化向量。
 
@@ -63,22 +209,35 @@ def build_vector(
     正文分词次之，标签作为弱先验。强度只调整整体尺度，不改变方向。
 
     关键词会先做一次**相似合并**：``抽象 / 抽象话 / 抽象人`` 这类同一个
-    概念的不同写法只按一个关键词计权，否则共享的双字窗口会被重复累加，
-    让一个方向在向量里被人为放大。
+    概念的不同写法只按一个关键词计权，否则会在向量里被人为放大。
+    合并后按**整词**计权：``二次元`` 就是 ``二次元``，不会再被滑窗拆成
+    ``二次``/``次元`` —— 否则群口味会变成一堆碎片。
     """
     weights: dict[str, float] = defaultdict(float)
 
+    # 整词表用于压制正文里的同源碎片（正文里出现“二次元”时不要再加“二次”）。
+    atomic_terms: list[str] = []
     for keyword in merge_similar_keywords(keywords, threshold=merge_threshold):
-        for token in tokenize(str(keyword)):
-            weights[token] += 3.0
-
-    for token in tokenize(text):
-        weights[token] += 1.0
+        for term in _term_tokens(keyword, rules):
+            weights[term] += 3.0
+            if term not in atomic_terms:
+                atomic_terms.append(term)
 
     for tag in tags:
-        for token in tokenize(str(tag)):
-            weights[token] += 0.5
+        for term in _term_tokens(tag, rules):
+            weights[term] += 0.5
+            if term not in atomic_terms:
+                atomic_terms.append(term)
 
+    for token in tokenize(text, exclude=atomic_terms, rules=rules):
+        if any(
+            token == term or (len(term) > len(token) and token in term)
+            for term in atomic_terms
+        ):
+            continue
+        weights[token] += 1.0
+
+    weights = merge_similar_terms(weights, rules)
     if not weights:
         return {}
 
@@ -156,8 +315,12 @@ def merge_profile_terms(
     profile: dict[str, float],
     threshold: float = 0.6,
     max_terms: int = 512,
+    rules: TermRules = DEFAULT_RULES,
 ) -> dict[str, float]:
     """把**整个口味词表**里的相似关键词合并，再重新归一化。
+
+    合并前先走一遍 ``rules``：别名归一、停用词、丢单字。旧版本留下的
+    ``站`` / ``玩梗`` / ``AI`` 会在这里被清掉或并到规范词上。
 
     与 ``merge_similar_keywords`` 的区别：那个只看一批新关键词，这个处理
     已经存在的老词条。群口味是长期累积的，之前登记过 ``抽象话``，今天又
@@ -167,6 +330,7 @@ def merge_profile_terms(
     合并时把相似词条的权重**相加**（它们本来就是同一个概念的证据），
     最后统一归一化，避免向量模长漂移。
     """
+    profile = _normalize_terms(profile, rules)
     if len(profile) < 2:
         return dict(profile)
 
@@ -219,6 +383,7 @@ def blend_into(
     addend: dict[str, float],
     momentum: float = 0.92,
     max_terms: int = 512,
+    rules: TermRules = DEFAULT_RULES,
 ) -> dict[str, float]:
     """把新样本融入群向量，带惯性衰减，避免一次异常内容带歪整个口味。
 
@@ -231,6 +396,10 @@ def blend_into(
         merged[key] = merged.get(key, 0.0) + value
     if not merged:
         return {}
+
+    # 别名归一 + 停用词过滤 + 同根词合并：
+    # 老版本留下的“二次”“次元”“玩梗”会在这一步并掉 / 丢掉。
+    merged = merge_similar_terms(merged, rules)
 
     # 保底：只保留权重最高的若干项，防止关键词表无限膨胀
     if len(merged) > max_terms:
