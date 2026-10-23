@@ -14,7 +14,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.commands import HELP_TEXT, CommandResult, Commands  # noqa: E402
+from core.commands import (  # noqa: E402
+    HELP_ADMIN,
+    HELP_ALL,
+    HELP_TEXT,
+    CommandResult,
+    Commands,
+)
 from core.config import DEFAULTS, Settings  # noqa: E402
 from core.models import Direction, GroupProfile  # noqa: E402
 from core.storage import Storage  # noqa: E402
@@ -76,7 +82,26 @@ class TestCommands(unittest.TestCase):
 
     # ---------------------------------------------------------------- ASCII
     def test_help_is_ascii(self):
-        HELP_TEXT.encode("ascii")
+        for block in (HELP_TEXT, HELP_ADMIN, HELP_ALL):
+            block.encode("ascii")
+
+    def test_help_topics(self):
+        basic = self.commands.dispatch(self.event, ["help"])
+        admin = self.commands.dispatch(self.event, ["help", "admin"])
+        full = self.commands.dispatch(self.event, ["help", "all"])
+        self.assertTrue(basic.ok)
+        self.assertIn("basic", basic.text)
+        self.assertTrue(admin.ok)
+        self.assertIn("debug", admin.text)
+        self.assertTrue(full.ok)
+        self.assertIn("basic", full.text)
+        self.assertIn("admin", full.text)
+
+    def test_help_blocks_fit_astrbot_forward_threshold(self):
+        # AstrBot folds replies longer than platform_settings.forward_threshold
+        # (default 1500) into a QQ chat record. Keep every topic well below it.
+        for block in (HELP_TEXT, HELP_ADMIN, HELP_ALL):
+            self.assertLess(len(block), 1500, f"help block too long: {len(block)}")
 
     # ---------------------------------------------------------------- 自助
     def test_register_current_group(self):

@@ -23,9 +23,11 @@ from .core.pipeline import Loggerish, Pipeline
 from .core.storage import Storage
 from .core.tracelog import Trace, describe_message
 
-# 插件指令一律 ASCII；alias 只作为历史中文指令的兼容入口
+# 插件指令一律 ASCII；alias 只作为历史中文指令的兼容入口。
+# ``sps`` = ShitPosts Sharer：QQ 的 emoji 输入会把 /shit 当成表情搜索，
+# 这个无意义短串不会被表情候选吃掉。
 COMMAND = "shit"
-ALIASES = {"spam", "ss"}
+ALIASES = {"spam", "ss", "sps"}
 
 
 @register(

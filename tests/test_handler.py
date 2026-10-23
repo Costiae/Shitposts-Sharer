@@ -201,6 +201,14 @@ class TestCommandHandler(unittest.TestCase):
         event.message_str = "/ss status"
         self.assertEqual(plugin_main._command_args(event, {"shit", "ss"}), ["status"])
 
+    def test_command_args_strips_emoji_safe_alias(self):
+        event = FakeEvent()
+        event.message_str = "/sps status"
+        self.assertEqual(
+            plugin_main._command_args(event, {"shit", "sps"}), ["status"]
+        )
+        self.assertIn("sps", plugin_main.ALIASES)
+
     def test_exception_becomes_plain_text_not_traceback(self):
         class Boom:
             def dispatch(self, *args, **kwargs):

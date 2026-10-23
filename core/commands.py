@@ -30,33 +30,44 @@ from .targets import (
     resolve,
 )
 
-HELP_TEXT = """Shitposts Sharer commands
-  <target> = group id, full UMO, #index, or name. Omit = current session.
+# Keep every help block well below AstrBot's default
+# platform_settings.forward_threshold (1500 chars). A longer reply gets folded
+# into a QQ "forwarded chat record" (聊天记录), which is hard to read and may
+# even fail to send. Split by topic instead of sending one giant block.
+HELP_TEXT = """Shitposts Sharer / basic
+target = group id, full UMO, #index, or name (omit = this group)
 
-  /shit register <receive|emit|both> [target] [threshold]   join the network
-  /shit unregister [target]                           leave the network
-  /shit on <target>                                   enable relay for a group
-  /shit off <target>                                  pause relay for a group
-  /shit image [on|off] [target]                       per-group image relay switch
-  /shit status [target]                               taste + confidence
-  /shit list                                          all groups
-  /shit threshold <0-1|xx%> [target]                  set delivery threshold
-  /shit purge [target]                                delete a group (admin)
-  /shit help                                          this text
+Network
+  register <receive|emit|both> [target] [threshold]   join
+  unregister [target]                                 leave
+  on|off [target]                                     relay on/off
+  image [on|off] [target]                             image relay
+  threshold <0-1|xx%> [target]                        delivery threshold
 
-Debug (admin):
-  /shit debug [target]                                show every gate and why it failed
-  /shit tags [target]                                 dump taste terms (all groups if omitted)
-  /shit tidy [target]                                 LLM-merge/drop taste terms
-  /shit relay [target]                                bypass direction/taste/confidence, relay now
-  /shit intake [target]                               force this message into the taste update
-  /shoot <text>                                       admin: test one payload
+Inspect
+  status [target]    taste + confidence
+  list               all groups
+  help [admin|all]   this help / admin / full
 
-Direction describes THE GROUP, not the plugin:
-  receive   this group receives shit from other groups; it is never a source
-  emit      this group produces shit that gets relayed out; it receives nothing
-  both      this group both produces and receives
-Changing another group requires admin; status/list are read-only."""
+Direction describes THE GROUP, not the plugin: receive / emit / both.
+Admin commands: /shit help admin
+Aliases: /spam /ss /sps"""
+
+HELP_ADMIN = """Shitposts Sharer / admin
+Admin only. <target> works as in basic help.
+
+Inspect
+  debug [target]    every gate + why it failed
+  tags [target]     taste terms (all groups if omitted)
+  tidy [target]     LLM-merge/drop taste terms
+
+Act
+  relay [target]    force relay now (sends)
+  intake [target]   force taste update (no send)
+  purge [target]    delete group
+  /shoot <text>     test one payload"""
+
+HELP_ALL = HELP_TEXT + "\n\n" + HELP_ADMIN
 
 
 @dataclass(slots=True)
@@ -122,7 +133,7 @@ class Commands:
         if action in ("purge", "drop"):
             return self.purge(event, rest, is_admin=is_admin)
         if action in ("help", "h", "?"):
-            return CommandResult(HELP_TEXT)
+            return self.help(rest)
 
         # ---- debug surface (admin) ----
         if action in ("debug", "dbg"):
@@ -139,6 +150,20 @@ class Commands:
             return self.force_delivery(event, rest, is_admin=is_admin, incoming=False)
 
         return CommandResult(f"Unknown subcommand: {action}\n\n{HELP_TEXT}", ok=False)
+
+    # ------------------------------------------------------------------ 帮助
+    def help(self, args: list[str] | None = None) -> CommandResult:
+        """分主题返回帮助，避免整块文本被 AstrBot 折叠成聊天记录。"""
+        topic = (args[0].strip().lower() if args else "")
+        if topic in ("", "basic", "b", "commands"):
+            return CommandResult(HELP_TEXT)
+        if topic in ("admin", "debug", "a"):
+            return CommandResult(HELP_ADMIN)
+        if topic in ("all", "full"):
+            return CommandResult(HELP_ALL)
+        return CommandResult(
+            f"Unknown help topic: {topic}\n\n{HELP_TEXT}", ok=False
+        )
 
     # ------------------------------------------------------------------ 调试
     def debug(

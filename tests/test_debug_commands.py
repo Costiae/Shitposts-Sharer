@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.commands import HELP_TEXT, Commands  # noqa: E402
+from core.commands import HELP_ADMIN, HELP_ALL, HELP_TEXT, Commands  # noqa: E402
 from core.config import DEFAULTS, Settings  # noqa: E402
 from core.models import Direction, GroupProfile, Message, Segment  # noqa: E402
 from core.pipeline import Loggerish, Pipeline  # noqa: E402
@@ -246,8 +246,9 @@ class TestDebugCommands(unittest.TestCase):
     # ---------------------------------------------------------------- help
     def test_help_mentions_debug_commands(self):
         for token in ("debug", "tags", "tidy", "relay", "intake"):
-            self.assertIn(token, HELP_TEXT)
-        HELP_TEXT.encode("ascii")
+            self.assertIn(token, HELP_ADMIN)
+        for block in (HELP_TEXT, HELP_ADMIN, HELP_ALL):
+            block.encode("ascii")
 
     def test_help_states_direction_subject_is_the_group(self):
         """帮助里必须写清主语：direction 描述的是群，不是插件。"""

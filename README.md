@@ -193,7 +193,7 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 | `/shit list` | 所有群一览（带 `#序号` 和 `[paused]` / `[image off]` 标记） |
 | `/shit threshold <0-1\|xx%> [target]` | 设单群阈值 |
 | `/shit purge [target]` | 彻底删除该群记录（仅管理员） |
-| `/shit help` | 帮助 |
+| `/shit help [basic\|admin\|all]` | 帮助；默认基础指令，`admin` 看调试指令，`all` 看全部 |
 
 调试指令（全部仅管理员）：
 
@@ -216,7 +216,14 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 - `debug` / `tags` / `tidy` / `relay` / `intake` / `shoot` 仅管理员
 - `status` / `list` 是只读查询，不强制管理员
 
-`/shit` 的别名：`/spam`、`/ss`。
+`/shit` 的别名：`/spam`、`/ss`、`/sps`。QQ 的表情输入有时会把 `/shit`
+当成表情搜索吃掉，推荐用 `/sps`（ShitPosts Sharer 的缩写）。
+
+帮助按主题拆成三段（basic / admin / all），每段都控制在 AstrBot
+`platform_settings.forward_threshold` 的默认值（1500 字）以内。否则 AstrBot
+会把超长回复折叠成 QQ 的“转发消息 / 聊天记录”，既难读，NapCat 在部分版本
+里还可能直接发不出去。如果你的 `forward_threshold` 调得比 1500 更低，
+可以在 WebUI 里调高它，或者只发 `/shit help basic`。
 
 ## 配置（WebUI）
 
@@ -375,7 +382,7 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 python -m unittest discover -s tests -t . -v
 ```
 
-当前 202 个测试。测试不需要 `astrbot` 包：发送组件用替身覆盖，
+当前 204 个测试。测试不需要 `astrbot` 包：发送组件用替身覆盖，
 核心逻辑（向量、可信度、路由、存储、上下文窗口、流水线、图片门槛、
 安全拦截、群图片开关、迁移）全部可在纯 Python 下测试。
 
