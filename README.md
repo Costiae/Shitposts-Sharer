@@ -382,7 +382,7 @@ Docker 部署时插件目录通常是挂载卷，`git clone`/`git pull` 后重�
 python -m unittest discover -s tests -t . -v
 ```
 
-当前 204 个测试。测试不需要 `astrbot` 包：发送组件用替身覆盖，
+当前 205 个测试。测试不需要 `astrbot` 包：发送组件用替身覆盖，
 核心逻辑（向量、可信度、路由、存储、上下文窗口、流水线、图片门槛、
 安全拦截、群图片开关、迁移）全部可在纯 Python 下测试。
 
