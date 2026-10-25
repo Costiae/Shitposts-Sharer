@@ -29,6 +29,7 @@ class KeywordMatcher:
             group.intake,
             threshold=self.settings.keyword_threshold,
             tolerance=self.settings.keyword_tolerance,
+            adaptive=True,
         )
         overlap = explain_overlap(shit.vector, group.intake)
         reason = "共享话题：" + "、".join(overlap) if overlap else "没有明显共同关键词"

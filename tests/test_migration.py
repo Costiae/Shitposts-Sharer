@@ -8,6 +8,7 @@ without re-registering.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 import unittest
@@ -175,7 +176,7 @@ class TestDriftColumnMigration(unittest.TestCase):
             self.assertEqual(group.drift, 0.0)
             # 老群默认保持图片搬运开启，行为不变
             self.assertTrue(group.image_enabled)
-            self.assertEqual(storage.read_setting("schema_version"), "4")
+            self.assertEqual(storage.read_setting("schema_version"), "6")
         finally:
             storage.close()
 
@@ -246,6 +247,85 @@ class TestShitImageColumnMigration(unittest.TestCase):
             self.assertEqual(loaded.image_tags, ["初音未来", "NSFW"])
             self.assertTrue(loaded.nsfw)
             self.assertAlmostEqual(loaded.image_vector["初音未来"], 0.8)
+        finally:
+            storage.close()
+
+
+class TestIntakeVectorMigration(unittest.TestCase):
+    """旧口味表里的碎片/停用词/邀请码必须在升级时清理一次。"""
+
+    def setUp(self):
+        self.db = scratch_path("migrate-intake")
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(self.db) + suffix).unlink(missing_ok=True)
+
+    def tearDown(self):
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(self.db) + suffix).unlink(missing_ok=True)
+
+    def test_legacy_terms_are_compacted(self):
+        raw = {
+            "b站": 0.52,
+            "鸡8狗10": 0.32,
+            "转发图": 0.25,
+            "二次元": 0.25,
+            "二次": 0.15,
+            "次元": 0.15,
+            "站": 0.10,
+            "玩梗": 0.20,
+            "AI": 0.10,
+            "角色图": 0.21,
+            (
+                "l2fj452ueusetgle7i3le8fq4inoas12dhek58ppm3tdaol4jb5jud2036u8"
+                "maiic5maf95oe33bpcuir2mqon9dvgfurgqqeoipqnsqvkhggrqem199lrbndl1j1d"
+            ): 0.20,
+            "抽象": 0.20,
+        }
+        storage = Storage(self.db)
+        storage._conn.execute(
+            "INSERT INTO groups(group_key, name, direction, intake_json) "
+            "VALUES(?, ?, 'both', ?)",
+            ("legacy-intake", "legacy", json.dumps(raw, ensure_ascii=False)),
+        )
+        storage.write_setting("schema_version", "4")
+        storage.close()
+
+        storage = Storage(self.db)
+        try:
+            group = storage.get_group("legacy-intake")
+            self.assertIsNotNone(group)
+            assert group is not None
+            for term in (
+                "b站",
+                "转发图",
+                "二次元",
+                "角色图",
+                "人工智能",
+                "抽象",
+            ):
+                self.assertIn(term, group.intake)
+            for noise in (
+                "二次",
+                "次元",
+                "站",
+                "玩梗",
+                "AI",
+                "鸡8狗10",
+                "l2fj452ueusetgle7i3le8fq4inoas12dhek58ppm3tdaol4jb5jud2036u8"
+                "maiic5maf95oe33bpcuir2mqon9dvgfurgqqeoipqnsqvkhggrqem199lrbndl1j1d",
+            ):
+                self.assertNotIn(noise, group.intake)
+            self.assertFalse(any(len(term) > 32 for term in group.intake))
+            self.assertEqual(storage.read_setting("schema_version"), "6")
+        finally:
+            storage.close()
+
+        # 重复启动不应再次放大权重。
+        storage = Storage(self.db)
+        try:
+            again = storage.get_group("legacy-intake")
+            assert again is not None
+            self.assertEqual(again.intake, group.intake)
         finally:
             storage.close()
 

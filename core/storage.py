@@ -17,8 +17,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .models import Direction, GroupProfile, ShitRecord
+from .vector import normalize_intake_terms
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS groups (
@@ -123,6 +124,8 @@ class Storage:
             version = int(self.read_setting("schema_version", "0") or 0)
         except ValueError:
             version = 0
+        if version < 6:
+            self._migrate_intake_vectors()
         if version < SCHEMA_VERSION:
             self.write_setting("schema_version", str(SCHEMA_VERSION))
 
@@ -176,6 +179,38 @@ class Storage:
             if updated:
                 self._write(lambda: None)  # 触发 commit
         self._conn.commit()
+
+    def _migrate_intake_vectors(self) -> None:
+        """把旧版/外部写入的口味表压成当前整词空间。
+
+        旧数据可能混有 2 字碎片（``二次``/``次元``/``站``）、停用词
+        （``玩梗``）、未归一的别名（``AI``）或邀请码/哈希。当前向量按
+        整词计权，这些残留会稀释或污染匹配；启动时统一清理一次，避免
+        老群明明有口味却匹配不到。
+        """
+        rows = self._conn.execute(
+            "SELECT group_key, intake_json FROM groups"
+        ).fetchall()
+        changed = False
+        for row in rows:
+            try:
+                raw = json.loads(row["intake_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(raw, dict) or not raw:
+                continue
+            normalized = normalize_intake_terms(raw)
+            if normalized != raw:
+                self._conn.execute(
+                    "UPDATE groups SET intake_json = ? WHERE group_key = ?",
+                    (
+                        json.dumps(normalized, ensure_ascii=False),
+                        row["group_key"],
+                    ),
+                )
+                changed = True
+        if changed:
+            self._conn.commit()
 
     # ------------------------------------------------------------------ 设置
     def read_setting(self, key: str, default: str = "") -> str:

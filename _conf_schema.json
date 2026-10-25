@@ -180,7 +180,7 @@
   "keyword_threshold": {
     "description": "关键词相似度阈值",
     "type": "float",
-    "hint": "屎与群口味的余弦相似度，低于此值视为不对味。",
+    "hint": "屎与群口味的余弦相似度上限。群口味是多次样本的混合向量，话题越多单项权重越低；实际门槛会自动压到 min(配置值, max(0.30, 最强 token×0.75))，避免多话题群永远无法命中。",
     "default": 0.75
   },
   "keyword_tolerance": {

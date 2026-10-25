@@ -29,6 +29,7 @@ from .targets import (
     render_ambiguous,
     resolve,
 )
+from .vector import adaptive_keyword_threshold
 
 # Keep every help block well below AstrBot's default
 # platform_settings.forward_threshold (1500 chars). A longer reply gets folded
@@ -208,9 +209,15 @@ class Commands:
             f"  confidence {confidence:.3f} vs threshold {threshold:.3f} "
             f"(k={self.settings.confidence_k:g})"
         )
+        keyword_threshold, keyword_tolerance = adaptive_keyword_threshold(
+            group.intake,
+            self.settings.keyword_threshold,
+            self.settings.keyword_tolerance,
+        )
         lines.append(
             f"  keyword_threshold={self.settings.keyword_threshold:.2f} "
-            f"tolerance={self.settings.keyword_tolerance:.2f}"
+            f"tolerance={self.settings.keyword_tolerance:.2f} "
+            f"(effective={keyword_threshold:.2f}/{keyword_tolerance:.2f})"
         )
         lines.append(
             f"  image relay: {'on' if group.image_enabled else 'off'} "
@@ -601,6 +608,11 @@ class Commands:
         assert group is not None
         confidence = self._confidence(group)
         threshold = self.settings.threshold_for(group.threshold)
+        keyword_threshold, keyword_tolerance = adaptive_keyword_threshold(
+            group.intake,
+            self.settings.keyword_threshold,
+            self.settings.keyword_tolerance,
+        )
         state = "running" if group.enabled else "paused"
         verdict = "eligible" if confidence >= threshold else "not enough samples"
         return CommandResult(
@@ -608,6 +620,8 @@ class Commands:
             f"direction : {group.direction.value} ({state})\n"
             f"image     : {'on' if group.image_enabled else 'off'}\n"
             f"confidence: {confidence:.2f} (threshold {threshold:.2f}) -> {verdict}\n"
+            f"keyword   : {self.settings.keyword_threshold:.2f} "
+            f"(effective {keyword_threshold:.2f}, tolerance {keyword_tolerance:.2f})\n"
             f"native    : {group.native_message_count} shit(s), "
             f"{group.native_char_count} chars\n"
             f"drift     : {group.drift:.2f} (stability {1 - 0.6 * group.drift:.2f})\n"

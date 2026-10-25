@@ -30,6 +30,30 @@ _STOP_WORDS = {
     "http", "https", "www", "com", "cn", "bilibili", "b23", "bv",
 }
 
+# 单条 token 最长长度。超长串通常是邀请码 / 短链 / 哈希，不是话题。
+_MAX_TOKEN_CHARS = 32
+_MAX_DIGIT_TOKEN = 8
+# 20 位以上、同时含字母和数字的 ASCII 串，大概率是邀请码/标识符。
+_INVITE_RE = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9_]{20,}$")
+# 汉字与多段数字交错（如“鸡8狗10”）：典型的分词/截取乱码，不是话题。
+_CJK_DIGIT_NOISE_RE = re.compile(r"^(?:[\u4e00-\u9fff]+\d+){2,}$")
+
+
+def _is_noise_token(token: str) -> bool:
+    """过滤超长串、邀请码/哈希、长数字 ID 和 CJK/数字交错乱码。"""
+    if not token:
+        return True
+    if len(token) > _MAX_TOKEN_CHARS:
+        return True
+    if _INVITE_RE.match(token):
+        return True
+    if _CJK_DIGIT_NOISE_RE.match(token):
+        return True
+    if token.isdigit() and len(token) > _MAX_DIGIT_TOKEN:
+        return True
+    return False
+
+
 # 2 字滑窗不认词边界，正文里必然切出“小时/时前”这类碎片。
 # 真正的词组由 keywords/tags 整词进入向量；正文里用 TermsRules 的
 # 停用词表拦掉这些碎片（见 core/terms.py）。
@@ -83,6 +107,8 @@ def tokenize(
         word = rules.canonical(word)
         if word in _STOP_WORDS or rules.is_stopped(word):
             continue
+        if _is_noise_token(word):
+            continue
         tokens.append(word)
     return tokens
 
@@ -116,6 +142,8 @@ def _term_tokens(term: str, rules: TermRules = DEFAULT_RULES) -> list[str]:
         piece = rules.canonical(piece)
         if piece in _STOP_WORDS or rules.is_stopped(piece):
             continue
+        if _is_noise_token(piece):
+            continue
         if len(piece) == 1:
             if piece in _STOP_CHARS:
                 continue
@@ -123,6 +151,16 @@ def _term_tokens(term: str, rules: TermRules = DEFAULT_RULES) -> list[str]:
             continue
         tokens.append(piece)
     return tokens
+
+
+def tokenize_keyword(term: str, rules: TermRules = DEFAULT_RULES) -> list[str]:
+    """公开的关键词分词入口：关键词/标签按“整词”进入向量。
+
+    与正文的 2 字滑窗不同，``二次元`` 仍然是 ``二次元``，不会碎成
+    ``二次``/``次元``；混合词 ``b站``、``鸡8狗10`` 也会完整保留。
+    这个函数主要给测试和调试使用，正常构建走 :func:`build_vector`。
+    """
+    return _term_tokens(term, rules)
 
 
 def _normalize_terms(
@@ -137,7 +175,15 @@ def _normalize_terms(
             continue
         if len(canonical) < 2:
             continue
-        normalized[canonical] += value
+        if _is_noise_token(canonical):
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if numeric <= 0:
+            continue
+        normalized[canonical] += numeric
     return dict(normalized)
 
 
@@ -192,6 +238,30 @@ def merge_similar_terms(
         representative = max(members, key=lambda term: (weights[term], len(term)))
         merged[representative] = sum(weights[term] for term in members)
     return merged
+
+
+def normalize_intake_terms(
+    profile: dict[str, float],
+    max_terms: int = 512,
+    rules: TermRules = DEFAULT_RULES,
+) -> dict[str, float]:
+    """把旧版/外部写入的口味表压成当前整词空间。
+
+    旧数据可能是 2 字滑窗碎片（``二次``/``次元``/``站``）、停用词
+    （``玩梗``）或未归一的别名；这里用 :func:`merge_similar_terms` 统一
+    清理：丢单字/停用词、别名归一、同根词合并，并优先保留权重最高
+    （同权更长）的代表词。对已经是现代整词的口味表是幂等的，可在迁移时
+    安全重复执行。
+    """
+    if not profile:
+        return {}
+    merged = merge_similar_terms(profile, rules)
+    if len(merged) > max_terms:
+        kept = sorted(merged.items(), key=lambda item: item[1], reverse=True)[
+            :max_terms
+        ]
+        merged = dict(kept)
+    return normalized_vector(merged)
 
 
 def build_vector(
@@ -444,20 +514,54 @@ def decay_weight(ts: float, half_life_days: float = DEFAULT_HALF_LIFE_DAYS) -> f
     return 0.5 ** (age_days / half_life_days)
 
 
+def adaptive_keyword_threshold(
+    group_vector: dict[str, float],
+    threshold: float,
+    tolerance: float,
+) -> tuple[float, float]:
+    """按群口味的集中度收紧/放宽关键词门槛。
+
+    群口味是多个话题的归一化混合向量：如果最高权重只有 0.5，那么
+    新屎即使命中这个最强话题，余弦也很难达到 0.75。此时还要求配置值
+    是数学上不可能的，会导致候选在关键词层就被淘汰，LLM 复核永远跑不到。
+
+    这里把配置值当作**上限**：实际门槛取
+    ``min(配置值, max(0.30, 最强 token × 0.75))``，给“一条新屎通常有
+    多个 token”留出余量；同时按实际门槛缩放容差，避免为了救回多话题群
+    把门槛放得过松。
+    """
+    top = max((value for value in group_vector.values() if value > 0), default=0.0)
+    if top <= 0:
+        return threshold, tolerance
+    effective = min(threshold, max(0.30, top * 0.75))
+    effective_tolerance = min(tolerance, max(0.02, effective * 0.20))
+    return effective, effective_tolerance
+
+
 def keyword_score(
     shit_vector: dict[str, float],
     group_vector: dict[str, float],
     threshold: float = 0.75,
     tolerance: float = 0.10,
+    *,
+    adaptive: bool = False,
 ) -> float:
     """关键词来源的打分：相似度过了阈值就算合格，靠近阈值时线性收敛。
 
     这样“差不多”也能过——需求就是“不必过于精确”，
     但远离阈值的群不会因为算了个小数就被搬。
 
+    ``adaptive=True`` 时会在比较前按群口味集中度调整门槛，专门处理
+    “长期累积、话题很多”的群；直接调用本函数做单元测试时默认关闭，
+    保持原有阈值语义。
+
     容差不取 0.05 这种刀尖值：中文双字滑窗的会话语料很稀疏，
     同话题的两段话余弦常常只有 0.6~0.8，卡太死会一条都搬不出去。
     """
+    if adaptive:
+        threshold, tolerance = adaptive_keyword_threshold(
+            group_vector, threshold, tolerance
+        )
     similarity = cosine(shit_vector, group_vector)
     if similarity >= threshold:
         return similarity

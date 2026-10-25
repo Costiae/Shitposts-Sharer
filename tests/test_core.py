@@ -45,6 +45,7 @@ from core.router import Router, fingerprint_of  # noqa: E402
 from core.storage import Storage  # noqa: E402
 from core.terms import TermRules  # noqa: E402
 from core.vector import (  # noqa: E402
+    adaptive_keyword_threshold,
     blend_into,
     build_vector,
     cosine,
@@ -53,7 +54,9 @@ from core.vector import (  # noqa: E402
     merge_profile_terms,
     merge_similar_keywords,
     merge_similar_terms,
+    normalize_intake_terms,
     tokenize,
+    tokenize_keyword,
 )
 
 
@@ -102,6 +105,29 @@ def make_image_shit(url: str = "http://x/a.png") -> ShitRecord:
     )
     record.fingerprint = fingerprint_of(record)
     return record
+
+
+DIFFUSE_TOPICS = [
+    ["b站", "视频", "分享", "二次元", "角色图"],
+    ["抽象", "逆天", "玩梗", "群友", "发言"],
+    ["azuma", "seren", "角色", "同人", "图"],
+    ["段子", "笑话", "抽象", "梗"],
+    ["转发图", "二次元", "角色图", "画师", "微博"],
+    ["b站", "直播", "切片", "主播", "视频"],
+    ["抽卡", "游戏", "角色", "二次元", "攻略"],
+]
+
+
+def make_diffuse_profile() -> dict[str, float]:
+    """模拟“长期累积、多个话题”的群口味。"""
+    profile: dict[str, float] = {}
+    for index in range(35):
+        keywords = DIFFUSE_TOPICS[index % len(DIFFUSE_TOPICS)]
+        text = "，".join(keywords) + " 模拟群聊文本包含额外词汇"
+        profile = blend_into(
+            profile, build_vector(keywords, text, 0.6), momentum=0.92
+        )
+    return merge_profile_terms(profile, threshold=0.6)
 
 
 class TestDirection(unittest.TestCase):
@@ -183,6 +209,75 @@ class TestVector(unittest.TestCase):
         tokens = tokenize("B站 3小时前")
         for noise in ("站", "小时", "时前"):
             self.assertNotIn(noise, tokens)
+
+    def test_keyword_tokenizer_keeps_mixed_and_short_terms(self):
+        self.assertEqual(tokenize_keyword("b站"), ["b站"])
+        self.assertEqual(tokenize_keyword("二次元"), ["二次元"])
+
+    def test_noise_tokens_are_dropped(self):
+        noise = (
+            "l2fj452ueusetgle7i3le8fq4inoas12dhek58ppm3tdaol4jb5jud2036u8"
+            "maiic5maf95oe33bpcuir2mqon9dvgfurgqqeoipqnsqvkhggrqem199lrbndl1j1d"
+        )
+        self.assertEqual(tokenize(noise), [])
+        self.assertEqual(tokenize_keyword(noise), [])
+        self.assertEqual(build_vector([noise], "", 0.8), {})
+        self.assertEqual(build_vector(["123456789"], "", 0.8), {})
+        # 汉字与多段数字交错是截取乱码，不是话题
+        self.assertEqual(tokenize_keyword("鸡8狗10"), [])
+        self.assertEqual(build_vector(["鸡8狗10"], "", 0.8), {})
+
+    def test_normalize_intake_terms_cleans_legacy_profile(self):
+        raw = {
+            "二次元": 0.25,
+            "二次": 0.15,
+            "次元": 0.15,
+            "站": 0.10,
+            "玩梗": 0.20,
+            "AI": 0.10,
+            "b站": 0.50,
+            "鸡8狗10": 0.30,
+            "角色图": 0.20,
+        }
+        normalized = normalize_intake_terms(raw)
+        for term in ("二次元", "b站", "角色图", "人工智能"):
+            self.assertIn(term, normalized)
+        for noise in ("二次", "次元", "站", "玩梗", "AI", "鸡8狗10"):
+            self.assertNotIn(noise, normalized)
+
+    def test_adaptive_threshold_rescues_diffuse_profile(self):
+        profile = make_diffuse_profile()
+        same_topic = build_vector(
+            DIFFUSE_TOPICS[0], "，".join(DIFFUSE_TOPICS[0]), 0.6
+        )
+        far_topic = build_vector(["考研", "数学", "论文"], "考研数学论文", 0.6)
+
+        self.assertEqual(
+            keyword_score(same_topic, profile, threshold=0.75, tolerance=0.10),
+            0.0,
+        )
+        self.assertGreater(
+            keyword_score(
+                same_topic,
+                profile,
+                threshold=0.75,
+                tolerance=0.10,
+                adaptive=True,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            keyword_score(
+                far_topic,
+                profile,
+                threshold=0.75,
+                tolerance=0.10,
+                adaptive=True,
+            ),
+            0.0,
+        )
+        effective, _ = adaptive_keyword_threshold(profile, 0.75, 0.10)
+        self.assertLess(effective, 0.75)
 
     def test_similar_terms_merge_into_one_representative(self):
         merged = merge_similar_terms({"机器": 1.0, "机器人": 2.0, "抽象": 1.0})
@@ -650,6 +745,22 @@ class TestRouter(unittest.TestCase):
         plan = self.router.keyword_plan(self.shit, groups, delivered={"in-only"})
         self.assertEqual(plan.candidates, [])
         self.assertTrue(plan.rejected)
+
+    def test_diffuse_profile_is_not_zeroed_by_keyword_gate(self):
+        group = GroupProfile(
+            group_key="diffuse",
+            direction=Direction.RECEIVE,
+            intake=make_diffuse_profile(),
+            native_message_count=50,
+            native_char_count=2500,
+        )
+        shit = make_shit(
+            "b站二次元角色图",
+            DIFFUSE_TOPICS[0],
+        )
+        router = Router(make_settings(threshold_overall=0.0))
+        plan = router.keyword_plan(shit, [group])
+        self.assertIn("diffuse", plan.group_keys())
 
 
 class TestImageGate(unittest.TestCase):
