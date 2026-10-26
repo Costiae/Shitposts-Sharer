@@ -448,6 +448,15 @@ class Storage:
             (status, shit_id, group_key),
         )
 
+    def remove_delivery(self, shit_id: str, group_key: str) -> None:
+        """Remove a failed delivery reservation so a later retry is possible."""
+        self._write(
+            self._conn.execute,
+            "DELETE FROM deliveries WHERE shit_id = ? AND group_key = ? "
+            "AND status IN ('pending', 'fail')",
+            (shit_id, group_key),
+        )
+
     def recent_deliveries(self, group_key: str, limit: int = 20) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT shit_id, score, confidence, source, status, created_at "

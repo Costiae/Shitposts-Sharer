@@ -613,6 +613,7 @@ class Pipeline:
                 )
             else:
                 self.stats.failed += 1
+                self.storage.remove_delivery(record.shit_id, target.group_key)
                 trace.warn(f"delivery to {target.group_key} FAILED")
 
         trace.gate("result")
@@ -762,7 +763,10 @@ class Pipeline:
             self.storage.upsert_group(target)
             return {"ok": True, "detail": f"intake updated for {target.group_key}"}
 
-        groups = self.storage.list_groups()
+        groups = [
+            item for item in self.storage.list_groups()
+            if item.direction.can_receive
+        ]
         if target_key:
             groups = [item for item in groups if item.group_key == target_key]
 
